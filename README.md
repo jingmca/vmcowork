@@ -1,19 +1,23 @@
 # Cowork Sandbox
 
+> v0.4.0 - 完整的 Claude CLI 参数支持 + 网络监控
+
 A macOS sandbox environment for running Claude Code safely in an isolated Linux VM.
 
 Inspired by Claude Code's "Cowork mode" - reverse engineered from Claude.app.
 
-## Features
+## ✨ Features
 
 - 🔒 **Secure Isolation**: Claude Code runs in a Linux VM, isolated from your host system
 - 📁 **File Sharing**: Share `~/cowork-workspace` with the VM at `/workspace`
 - 🔄 **Conversation Continuity**: Support for continuing conversations with `-c` flag
-- 📂 **Project Management**: Organize different projects with `-p` flag
+- 📂 **Project Management**: Organize different projects with `--project` flag
+- 🎯 **Full Claude CLI Support**: All 40+ Claude CLI parameters supported (v0.4.0+)
 - 🌐 **Network Monitoring**: Monitor and log all network traffic with proxy
 - 🛡️ **Traffic Audit**: See what external resources Claude accesses
 - 🛠️ **Full Dev Environment**: Python, Node.js, GCC, Java pre-installed
 - 🔧 **Dual Interface**: CLI tools + Python API
+- 📊 **Comprehensive Testing**: 20 test cases included
 
 ## Architecture
 
@@ -146,22 +150,31 @@ Commands:
   help      Show this help message
 
 Options for 'ask' command:
-  -c              Continue previous conversation
-  -p <project>    Work in specific project directory
+  -c, --continue            Continue previous conversation
+  --project <name>          Work in specific project directory (replaces old -p)
+  --model <model>           Use specific model (opus/sonnet/haiku)
+  --max-budget-usd <amt>    Set budget limit
+  --system-prompt <prompt>  Custom system prompt
+  --allowed-tools <tools>   Specify allowed tools
+  ... and 40+ more Claude CLI parameters (see docs/04-claude-parameters.md)
 
 Options for 'proxy' command:
   -l <file>       Log to file
   -v              Verbose output
 
 Examples:
-  cowork init                                  # Create and start VM
-  cowork proxy -l proxy.log                    # Monitor traffic
-  cowork ask "write hello world"               # New conversation
-  cowork ask -c "add tests"                    # Continue conversation
-  cowork ask -p myapp "create flask app"       # Work in project
-  cowork ask -p myapp -c "add authentication"  # Continue in project
-  cowork exec "python3 script.py"              # Run command
-  cowork shell                                 # Enter VM
+  cowork init                                       # Create and start VM
+  cowork proxy -l proxy.log                         # Monitor traffic
+  cowork ask "write hello world"                    # New conversation
+  cowork ask -c "add tests"                         # Continue conversation
+  cowork ask --project myapp "create flask app"     # Work in project
+  cowork ask --project myapp -c "add auth"          # Continue in project
+  cowork ask --model opus "complex task"            # Use Opus model
+  cowork ask --max-budget-usd 1.0 "expensive task"  # Set budget
+  cowork exec "python3 script.py"                   # Run command
+  cowork shell                                      # Enter VM
+
+Note: Old syntax `-p <project>` is deprecated. Use `--project <name>` instead.
 ```
 
 ## Python API
@@ -189,8 +202,40 @@ result = controller.ask_claude(
     continue_conversation=True
 )
 
+# Use advanced Claude parameters (v0.4.0+)
+result = controller.ask_claude(
+    "create complex system",
+    project="backend",
+    claude_args=["--model", "opus", "--max-budget-usd", "2.0"]
+)
+
 # Execute commands
 result = controller.execute_in_vm("python3 /workspace/script.py")
+```
+
+## Documentation
+
+- **[Quick Start Guide](QUICKSTART.md)** - Get started in 5 minutes
+- **[Usage Guide](USAGE.md)** - Comprehensive usage documentation
+- **[Claude Parameters Guide](docs/04-claude-parameters.md)** - All Claude CLI parameters (v0.4.0+)
+- **[Proxy Monitoring Guide](docs/03-proxy-monitoring.md)** - Network traffic monitoring
+- **[Contributing Guide](CONTRIBUTING.md)** - Development guidelines
+- **[Test Cases](TEST_CASES.md)** - 20 comprehensive test cases
+- **[Design Documents](docs/)** - Architecture and research
+
+## Testing
+
+Run the included test suite:
+
+```bash
+# Automated tests (recommended)
+./run_tests.sh
+
+# Manual tests
+# See TEST_CASES.md for 20 test cases
+
+# Unit tests
+./scripts/test.sh
 ```
 
 Run examples:
