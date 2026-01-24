@@ -4,6 +4,16 @@ A macOS sandbox environment for running Claude Code safely in an isolated Linux 
 
 Inspired by Claude Code's "Cowork mode" - reverse engineered from Claude.app.
 
+## Features
+
+- 🔒 **Secure Isolation**: Claude Code runs in a Linux VM, isolated from your host system
+- 📁 **File Sharing**: Share `~/cowork-workspace` with the VM at `/workspace`
+- 🔄 **Conversation Continuity**: Support for continuing conversations with `-c` flag
+- 📂 **Project Management**: Organize different projects with `-p` flag
+- 🌐 **Proxy Support**: Network traffic routes through host:7890
+- 🛠️ **Full Dev Environment**: Python, Node.js, GCC, Java pre-installed
+- 🔧 **Dual Interface**: CLI tools + Python API
+
 ## Architecture
 
 ```
@@ -50,59 +60,73 @@ limactl --version
 
 ## Quick Start
 
-### 1. Clone/Setup Project
+### 1. Prerequisites
 
 ```bash
-cd ~/Downloads/cowork-sandbox
+# Install Lima
+brew install lima
 
-# Create host workspace directory
-mkdir -p ~/cowork-workspace
+# Verify installation
+limactl --version
 ```
 
-### 2. Initialize VM
+### 2. Setup Configuration
 
 ```bash
-# Using the cowork CLI
-./scripts/cowork init
+# Copy environment template
+cp .env.example .env
 
-# Or manually with Lima
-limactl start --name=sandbox sandbox.yaml
+# Edit .env and add your API credentials
+nano .env
+```
+
+Required environment variables:
+```bash
+ANTHROPIC_AUTH_TOKEN=your-api-token-here
+ANTHROPIC_BASE_URL=https://your-api-endpoint
+```
+
+### 3. Initialize VM
+
+```bash
+# Load environment variables
+source .env
+
+# Initialize VM (first time only)
+./scripts/cowork init
 ```
 
 This will:
-- Download Ubuntu 22.04 ARM64 image
+- Download Ubuntu 22.04 ARM64 image (~800MB)
 - Create a VM with 4 CPU, 4GB RAM, 10GB disk
 - Install Python, Node.js, GCC, Java
 - Install Claude Code CLI
+- Configure proxy to host:7890
 
-### 3. Use Claude Code in Sandbox
+### 4. Start Using
 
 ```bash
-# Interactive mode (full Claude Code experience)
-./scripts/cowork claude
-
-# Non-interactive mode (script-friendly)
+# Ask Claude (new conversation)
 ./scripts/cowork ask "write a python hello world program"
 
-# Execute commands directly
+# Continue previous conversation
+./scripts/cowork ask -c "add error handling"
+
+# Work in a specific project
+./scripts/cowork ask -p myproject "create a web app"
+./scripts/cowork ask -p myproject -c "add authentication"
+
+# Interactive mode
+./scripts/cowork claude
+
+# Execute commands in VM
 ./scripts/cowork exec "python3 --version"
-./scripts/cowork exec "ls -la /workspace"
-```
-
-### 4. Enter VM Shell
-
-```bash
-./scripts/cowork shell
-
-# Inside VM, you have full access
-cd /workspace
-claude  # Run Claude Code interactively
 ```
 
 ## CLI Reference
 
 ```
-cowork <command> [arguments]
+Usage: cowork <command> [options] [arguments]
 
 Commands:
   init      Initialize/create the sandbox VM
@@ -115,29 +139,55 @@ Commands:
   exec      Execute a command in VM
   delete    Delete the sandbox VM
   help      Show this help message
+
+Options for 'ask' command:
+  -c              Continue previous conversation
+  -p <project>    Work in specific project directory
+
+Examples:
+  cowork init                                  # Create and start VM
+  cowork ask "write hello world"               # New conversation
+  cowork ask -c "add tests"                    # Continue conversation
+  cowork ask -p myapp "create flask app"       # Work in project
+  cowork ask -p myapp -c "add authentication"  # Continue in project
+  cowork exec "python3 script.py"              # Run command
+  cowork shell                                 # Enter VM
 ```
 
-## Python Controller
+## Python API
 
-For programmatic access:
+For programmatic access, see [examples/basic_usage.py](examples/basic_usage.py):
 
 ```python
 from host.controller import CoworkController, SandboxConfig
 
-# Create controller
-config = SandboxConfig(vm_name="sandbox", working_dir="/workspace")
-controller = CoworkController(config)
-
-# Check status
-print(controller.get_vm_info())
-
-# Ask Claude
+# Basic usage
+controller = CoworkController()
 result = controller.ask_claude("write a function to calculate fibonacci")
 print(result.output)
 
+# With project directory
+result = controller.ask_claude(
+    "create a web app",
+    project="myapp"
+)
+
+# Continue conversation
+result = controller.ask_claude(
+    "add authentication",
+    project="myapp",
+    continue_conversation=True
+)
+
 # Execute commands
-result = controller.execute_in_vm("python3 fibonacci.py")
-print(result.output)
+result = controller.execute_in_vm("python3 /workspace/script.py")
+```
+
+Run examples:
+```bash
+# Make sure VM is running and env vars are set
+source .env
+python3 examples/basic_usage.py
 ```
 
 ## File Sharing
@@ -215,10 +265,61 @@ curl -fsSL https://claude.ai/install.sh | sh
 
 ## Security Notes
 
-1. **Isolation**: Code runs in VM, cannot access host system directly
-2. **File Access**: Only `~/cowork-workspace` is shared
-3. **Network**: VM has full network access (can be restricted in Lima config)
-4. **No Bubblewrap**: This MVP doesn't include the additional Bubblewrap layer
+### Current Security Layers
+
+1. **VM Isolation**: Code runs in Ubuntu VM, cannot access host directly
+2. **File Access**: Only `~/cowork-workspace` is shared with VM
+3. **Proxy Configuration**: Network traffic routes through host:7890
+4. **Permission Bypass**: Claude Code runs with `--dangerously-skip-permissions` in sandbox
+
+### Security Considerations
+
+- VM has full network access (configurable via proxy)
+- VM can read/write to `/workspace` directory
+- No Bubblewrap or Seccomp in MVP (see Phase 2)
+- Regular backups of `~/cowork-workspace` recommended
+
+## Testing
+
+Run the test suite to verify installation:
+
+```bash
+./scripts/test.sh
+```
+
+This will check:
+- Prerequisites (Lima, Python, jq)
+- VM status and functionality
+- File I/O operations
+- Claude Code installation
+- Project directory management
+
+## Documentation
+
+- **[USAGE.md](USAGE.md)** - Detailed usage guide with examples
+- **[docs/01-research.md](docs/01-research.md)** - Reverse engineering analysis
+- **[docs/02-design.md](docs/02-design.md)** - System design and architecture
+- **[examples/](examples/)** - Python API examples
+
+## Project Structure
+
+```
+cowork-sandbox/
+├── docs/                   # Design documents
+│   ├── 01-research.md      # Cowork mode analysis
+│   └── 02-design.md        # System design
+├── host/                   # Host-side code
+│   └── controller.py       # Python controller API
+├── scripts/                # CLI tools
+│   ├── cowork              # Main CLI script
+│   └── test.sh             # Test suite
+├── examples/               # Usage examples
+│   └── basic_usage.py      # Python API examples
+├── sandbox.yaml            # Lima VM configuration
+├── .env.example            # Environment template
+├── USAGE.md                # Detailed usage guide
+└── README.md               # This file
+```
 
 ## Next Steps (Advanced)
 
