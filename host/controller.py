@@ -180,6 +180,7 @@ class CoworkController:
         allowed_tools: Optional[list] = None,
         continue_conversation: bool = False,
         project: Optional[str] = None,
+        claude_args: Optional[list] = None,
     ) -> ExecutionResult:
         """
         Send a prompt to Claude Code in the VM using -p mode.
@@ -192,9 +193,17 @@ class CoworkController:
             continue_conversation: If True, use -c flag to continue previous conversation
             project: Project folder name under workspace. If provided, Claude will work
                      in /workspace/{project}. Directory will be created if not exists.
+            claude_args: Additional Claude CLI arguments as a list (e.g., ["--model", "opus"])
 
         Returns:
             ExecutionResult with Claude's response
+
+        Example:
+            controller.ask_claude(
+                "write hello world",
+                project="myapp",
+                claude_args=["--model", "opus", "--max-budget-usd", "1.0"]
+            )
         """
         if not self.is_vm_running():
             if not self.start_vm():
@@ -215,7 +224,7 @@ class CoworkController:
         # Escape the prompt for shell
         escaped_prompt = shlex.quote(prompt)
 
-        # Build claude command with environment variables
+        # Build environment variables
         env_vars = ""
         if self.config.anthropic_auth_token:
             env_vars += (
@@ -226,14 +235,27 @@ class CoworkController:
                 f"ANTHROPIC_BASE_URL={shlex.quote(self.config.anthropic_base_url)} "
             )
 
-        # Build base claude command with flags
-        continue_flag = "-c " if continue_conversation else ""
-        claude_cmd = f"cd {working_dir} && {env_vars}claude -p {continue_flag}--dangerously-skip-permissions {escaped_prompt}"
+        # Build Claude command parts
+        cmd_parts = ["claude", "-p", "--dangerously-skip-permissions"]
+
+        # Add continue flag if specified
+        if continue_conversation:
+            cmd_parts.append("-c")
 
         # Add allowed tools if specified
         if allowed_tools:
-            tools_str = ",".join(allowed_tools)
-            claude_cmd = f"cd {working_dir} && {env_vars}claude -p {continue_flag}--dangerously-skip-permissions --allowedTools {tools_str} {escaped_prompt}"
+            cmd_parts.append("--allowedTools")
+            cmd_parts.append(",".join(allowed_tools))
+
+        # Add any additional Claude args
+        if claude_args:
+            cmd_parts.extend(claude_args)
+
+        # Add prompt as last argument
+        cmd_parts.append(escaped_prompt)
+
+        # Build full command
+        claude_cmd = f"cd {working_dir} && {env_vars}{' '.join(cmd_parts)}"
 
         start_time = datetime.now()
 
@@ -271,6 +293,7 @@ class CoworkController:
             )
         except Exception as e:
             return ExecutionResult(success=False, output="", error=str(e))
+
 
     def read_file(self, path: str) -> ExecutionResult:
         """Read a file from the VM."""

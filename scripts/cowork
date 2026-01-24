@@ -181,34 +181,39 @@ cmd_claude() {
     limactl shell "$VM_NAME" -- bash -c "cd $vm_workspace && ${env_vars}claude --dangerously-skip-permissions"
 }
 
-# Ask Claude (non-interactive, -p mode)
-# Usage: cmd_ask [-c] [-p project] "prompt"
+# Ask Claude (supports all Claude CLI arguments)
+# Usage: cmd_ask [--project <name>] [claude options] "prompt"
 cmd_ask() {
     check_lima
 
-    local continue_flag=""
     local project=""
+    local claude_args=""
+    local prompt=""
 
-    # Parse flags
+    # Parse cowork-specific flags first
     while [ $# -gt 0 ]; do
         case "$1" in
-            -c)
-                continue_flag="-c "
-                shift
-                ;;
-            -p)
+            --project|--proj)
                 shift
                 project="$1"
                 shift
                 ;;
             *)
+                # Collect remaining arguments as Claude args + prompt
                 break
                 ;;
         esac
     done
 
-    if [ -z "$1" ]; then
-        print_error "Usage: cowork ask [-c] [-p project] \"your prompt here\""
+    # Everything else goes to Claude
+    if [ $# -eq 0 ]; then
+        print_error "Usage: cowork ask [--project <name>] [claude options] \"prompt\""
+        print_error "Examples:"
+        print_error "  cowork ask \"write hello world\""
+        print_error "  cowork ask -c \"continue this\""
+        print_error "  cowork ask --project myapp \"create a flask app\""
+        print_error "  cowork ask --model opus \"complex task\""
+        print_error "  cowork ask --max-budget-usd 1.0 \"expensive task\""
         exit 1
     fi
 
@@ -232,7 +237,6 @@ cmd_ask() {
         limactl shell "$VM_NAME" -- mkdir -p "$vm_workspace"
     fi
 
-    local prompt="$*"
     # Build environment variables for Claude API
     local env_vars=""
     if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
@@ -241,7 +245,11 @@ cmd_ask() {
     if [ -n "$ANTHROPIC_BASE_URL" ]; then
         env_vars="${env_vars}ANTHROPIC_BASE_URL='$ANTHROPIC_BASE_URL' "
     fi
-    limactl shell "$VM_NAME" -- bash -c "cd $vm_workspace && ${env_vars}claude -p ${continue_flag}--dangerously-skip-permissions '$prompt'"
+
+    # Pass all arguments to Claude CLI
+    # Note: Always use -p (print mode) for non-interactive operation
+    # Note: Always use --dangerously-skip-permissions for sandbox
+    limactl shell "$VM_NAME" -- bash -c "cd $vm_workspace && ${env_vars}claude -p --dangerously-skip-permissions $(printf '%q ' "$@")"
 }
 
 # Execute command in VM
@@ -335,29 +343,52 @@ cmd_help() {
     echo "  status    Show VM status and info"
     echo "  shell     Enter VM shell"
     echo "  claude    Start Claude Code interactively in VM"
-    echo "  ask       Ask Claude (non-interactive -p mode)"
+    echo "  ask       Ask Claude (non-interactive mode, supports all Claude CLI options)"
     echo "  exec      Execute a command in VM"
     echo "  proxy     Start network proxy monitor (port 7890)"
     echo "  delete    Delete the sandbox VM"
     echo "  help      Show this help message"
     echo ""
+    echo "Ask Command Usage:"
+    echo "  cowork ask [--project <name>] [claude options] \"prompt\""
+    echo ""
+    echo "  Cowork-specific options:"
+    echo "    --project <name>  Work in project directory (replaces old -p flag)"
+    echo "    --proj <name>     Short form of --project"
+    echo ""
+    echo "  All Claude CLI options are supported, including:"
+    echo "    -c, --continue                Continue previous conversation"
+    echo "    --model <model>               Use specific model (sonnet/opus/haiku)"
+    echo "    --max-budget-usd <amount>     Set budget limit"
+    echo "    --system-prompt <prompt>      Custom system prompt"
+    echo "    --add-dir <dirs...>           Additional directories"
+    echo "    --allowed-tools <tools...>    Specify allowed tools"
+    echo "    --json-schema <schema>        Structured output"
+    echo "    --mcp-config <configs...>     MCP server configs"
+    echo "    ... and many more (see 'claude --help' for full list)"
+    echo ""
     echo "Examples:"
-    echo "  cowork init                           # Create and start VM"
-    echo "  cowork ask \"write hello world\"        # Ask Claude (new conversation)"
-    echo "  cowork ask -c \"continue this\"         # Continue previous conversation"
-    echo "  cowork ask -p myproject \"init repo\"   # Work in project folder"
-    echo "  cowork ask -p myproject -c \"add tests\" # Continue in project folder"
-    echo "  cowork claude                         # Interactive Claude"
-    echo "  cowork exec \"python3 hello.py\"        # Run command in VM"
-    echo "  cowork shell                          # Enter VM shell"
-    echo "  cowork proxy                          # Monitor network traffic"
-    echo "  cowork proxy -l proxy.log -v          # Monitor with logging"
+    echo "  cowork init                                    # Create and start VM"
+    echo "  cowork ask \"write hello world\"                 # New conversation"
+    echo "  cowork ask -c \"continue this\"                  # Continue conversation"
+    echo "  cowork ask --project myapp \"create flask app\"  # Work in project"
+    echo "  cowork ask --project myapp -c \"add tests\"      # Continue in project"
+    echo "  cowork ask --model opus \"complex task\"         # Use Opus model"
+    echo "  cowork ask --max-budget-usd 1.0 \"task\"         # Set budget limit"
+    echo "  cowork ask --system-prompt \"You are X\" \"task\" # Custom prompt"
+    echo "  cowork claude                                  # Interactive Claude"
+    echo "  cowork exec \"python3 hello.py\"                 # Run command in VM"
+    echo "  cowork shell                                   # Enter VM shell"
+    echo "  cowork proxy                                   # Monitor network traffic"
+    echo "  cowork proxy -l proxy.log -v                   # Monitor with logging"
     echo ""
     echo "Environment variables:"
     echo "  COWORK_VM_NAME        VM name (default: sandbox)"
     echo "  COWORK_WORKSPACE      Workspace path (default: /workspace)"
     echo "  ANTHROPIC_AUTH_TOKEN  API token for Claude Code"
     echo "  ANTHROPIC_BASE_URL    Base URL for Claude API"
+    echo ""
+    echo "Note: The old '-p <project>' syntax is deprecated. Use '--project <name>' instead."
     echo ""
 }
 
