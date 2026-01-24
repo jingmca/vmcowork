@@ -237,7 +237,66 @@ if [ "$VM_RUNNING" = true ]; then
         ((TOTAL_TESTS++))
     fi
 
+fi
+
+# Test 20: Proxy monitor tests (independent of VM)
+echo ""
+echo "Proxy Monitor Tests:"
+echo ""
+
+# Test proxy monitor script exists
+run_test "Proxy monitor script exists" "test -f $PROJECT_DIR/host/proxy_monitor.py"
+
+# Test proxy monitor is executable
+run_test "Proxy monitor is executable" "test -x $PROJECT_DIR/host/proxy_monitor.py"
+
+# Test proxy monitor help
+run_test "Proxy monitor --help works" "python3 $PROJECT_DIR/host/proxy_monitor.py --help"
+
+# Test proxy monitor Python imports
+if python3 -c "import sys; sys.path.insert(0, '$PROJECT_DIR/host'); from proxy_monitor import ProxyMonitor, RequestLog" > /dev/null 2>&1; then
+    print_pass "Proxy monitor imports successfully"
+    ((PASSED_TESTS++))
+    ((TOTAL_TESTS++))
+
+    # Test proxy monitor functionality
+    if python3 -c "
+import sys
+sys.path.insert(0, '$PROJECT_DIR/host')
+from proxy_monitor import ProxyMonitor, RequestLog
+
+monitor = ProxyMonitor()
+req_log = RequestLog(
+    timestamp='2026-01-25T10:00:00',
+    method='GET',
+    url='http://example.com',
+    host='example.com',
+    path='/',
+    status_code=200,
+    response_size=1024,
+    duration_ms=100.0
+)
+monitor.log_request(req_log)
+stats = monitor.get_stats()
+assert stats['total_requests'] == 1
+assert stats['successful_requests'] == 1
+assert 'example.com' in stats['unique_hosts']
+" > /dev/null 2>&1; then
+        print_pass "Proxy monitor basic functionality"
+        ((PASSED_TESTS++))
+        ((TOTAL_TESTS++))
+    else
+        print_fail "Proxy monitor basic functionality"
+        ((FAILED_TESTS++))
+        ((TOTAL_TESTS++))
+    fi
 else
+    print_fail "Proxy monitor imports successfully"
+    ((FAILED_TESTS++))
+    ((TOTAL_TESTS++))
+fi
+
+if [ "$VM_RUNNING" != true ]; then
     echo ""
     echo -e "${YELLOW}⚠ Skipping VM functionality tests (VM not running)${NC}"
     echo -e "${YELLOW}  Run './scripts/cowork init' to create and start the VM${NC}"

@@ -1,4 +1,4 @@
-.PHONY: help init start stop status test clean install
+.PHONY: help init start stop status test clean install proxy
 
 # Default target
 help:
@@ -11,6 +11,7 @@ help:
 	@echo "  make status     - 查看 VM 状态"
 	@echo "  make test       - 运行测试套件"
 	@echo "  make example    - 运行 Python 示例"
+	@echo "  make proxy      - 启动网络代理监控"
 	@echo "  make clean      - 删除 VM"
 	@echo "  make help       - 显示此帮助信息"
 
@@ -50,6 +51,11 @@ test:
 example:
 	@echo "运行 Python 示例..."
 	@python3 examples/basic_usage.py
+
+# Start proxy monitor
+proxy:
+	@echo "启动网络代理监控..."
+	@./scripts/cowork proxy -l proxy.log -v
 
 # Clean up VM
 clean:

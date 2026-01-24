@@ -278,6 +278,50 @@ cmd_delete() {
     fi
 }
 
+# Start proxy monitor
+cmd_proxy() {
+    check_lima
+
+    local log_file=""
+    local verbose=""
+
+    # Parse options
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -l|--log)
+                shift
+                log_file="$1"
+                shift
+                ;;
+            -v|--verbose)
+                verbose="-v"
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    print_header
+    print_info "Starting network proxy monitor on port 7890..."
+    print_info "This will log all HTTP/HTTPS traffic from the VM"
+    print_info "Press Ctrl+C to stop"
+    echo ""
+
+    # Build command
+    local cmd="python3 $PROJECT_DIR/host/proxy_monitor.py --host 0.0.0.0 --port 7890"
+    if [ -n "$log_file" ]; then
+        cmd="$cmd --log-file $log_file"
+    fi
+    if [ -n "$verbose" ]; then
+        cmd="$cmd $verbose"
+    fi
+
+    # Run proxy monitor
+    $cmd
+}
+
 # Show help
 cmd_help() {
     print_header
@@ -293,6 +337,7 @@ cmd_help() {
     echo "  claude    Start Claude Code interactively in VM"
     echo "  ask       Ask Claude (non-interactive -p mode)"
     echo "  exec      Execute a command in VM"
+    echo "  proxy     Start network proxy monitor (port 7890)"
     echo "  delete    Delete the sandbox VM"
     echo "  help      Show this help message"
     echo ""
@@ -305,6 +350,8 @@ cmd_help() {
     echo "  cowork claude                         # Interactive Claude"
     echo "  cowork exec \"python3 hello.py\"        # Run command in VM"
     echo "  cowork shell                          # Enter VM shell"
+    echo "  cowork proxy                          # Monitor network traffic"
+    echo "  cowork proxy -l proxy.log -v          # Monitor with logging"
     echo ""
     echo "Environment variables:"
     echo "  COWORK_VM_NAME        VM name (default: sandbox)"
@@ -341,6 +388,10 @@ case "${1:-help}" in
     exec)
         shift
         cmd_exec "$@"
+        ;;
+    proxy)
+        shift
+        cmd_proxy "$@"
         ;;
     delete)
         cmd_delete

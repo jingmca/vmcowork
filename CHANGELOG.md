@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-01-25
+
+### Added
+- Network proxy monitoring tool (Phase 2 feature)
+  - Real-time HTTP/HTTPS traffic monitoring
+  - Detailed request logging with timestamps, URLs, status codes
+  - Traffic statistics (request count, unique hosts, data transferred)
+  - JSON log export functionality
+  - Support for HTTPS CONNECT tunneling
+- `cowork proxy` command with options:
+  - `-l/--log` for file logging
+  - `-v/--verbose` for detailed output
+- Comprehensive proxy monitoring documentation (docs/03-proxy-monitoring.md)
+- Statistical reporting (every 60 seconds)
+
+### Changed
+- Updated README with network monitoring features
+- Enhanced CLI help with proxy command
+
+## [0.2.0] - 2026-01-25
+
 ### Added
 - Comprehensive documentation suite (USAGE.md, QUICKSTART.md, CONTRIBUTING.md)
 - Automated test suite (scripts/test.sh)

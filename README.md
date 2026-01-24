@@ -10,7 +10,8 @@ Inspired by Claude Code's "Cowork mode" - reverse engineered from Claude.app.
 - 📁 **File Sharing**: Share `~/cowork-workspace` with the VM at `/workspace`
 - 🔄 **Conversation Continuity**: Support for continuing conversations with `-c` flag
 - 📂 **Project Management**: Organize different projects with `-p` flag
-- 🌐 **Proxy Support**: Network traffic routes through host:7890
+- 🌐 **Network Monitoring**: Monitor and log all network traffic with proxy
+- 🛡️ **Traffic Audit**: See what external resources Claude accesses
 - 🛠️ **Full Dev Environment**: Python, Node.js, GCC, Java pre-installed
 - 🔧 **Dual Interface**: CLI tools + Python API
 
@@ -119,6 +120,9 @@ This will:
 # Interactive mode
 ./scripts/cowork claude
 
+# Monitor network traffic (in another terminal)
+./scripts/cowork proxy -l proxy.log
+
 # Execute commands in VM
 ./scripts/cowork exec "python3 --version"
 ```
@@ -137,6 +141,7 @@ Commands:
   claude    Start Claude Code interactively in VM
   ask       Ask Claude (non-interactive -p mode)
   exec      Execute a command in VM
+  proxy     Start network proxy monitor
   delete    Delete the sandbox VM
   help      Show this help message
 
@@ -144,8 +149,13 @@ Options for 'ask' command:
   -c              Continue previous conversation
   -p <project>    Work in specific project directory
 
+Options for 'proxy' command:
+  -l <file>       Log to file
+  -v              Verbose output
+
 Examples:
   cowork init                                  # Create and start VM
+  cowork proxy -l proxy.log                    # Monitor traffic
   cowork ask "write hello world"               # New conversation
   cowork ask -c "add tests"                    # Continue conversation
   cowork ask -p myapp "create flask app"       # Work in project
