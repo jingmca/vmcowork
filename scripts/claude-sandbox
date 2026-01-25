@@ -1,0 +1,24 @@
+#!/usr/bin/env node
+/**
+ * claude-sandbox - Run Claude Code in isolated Lima VM sandbox
+ * Node.js wrapper for cross-platform spawn compatibility
+ */
+
+const { spawn } = require('child_process');
+const path = require('path');
+
+const scriptPath = path.join(__dirname, 'claude-sandbox.sh');
+
+const child = spawn('bash', [scriptPath, ...process.argv.slice(2)], {
+  stdio: 'inherit',
+  env: process.env
+});
+
+child.on('close', (code) => {
+  process.exit(code || 0);
+});
+
+child.on('error', (err) => {
+  console.error('Failed to start claude-sandbox:', err.message);
+  process.exit(1);
+});

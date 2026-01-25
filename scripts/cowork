@@ -8,8 +8,21 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Change to home directory to avoid Lima's "cd: No such file or directory" warning
+# Lima tries to cd to host's current directory which may not exist in VM
+cd ~
+
 VM_NAME="${COWORK_VM_NAME:-sandbox}"
 WORKSPACE="${COWORK_WORKSPACE:-/workspace}"
+
+# Runtime configuration (can be overridden via command line)
+PROXY_HOST="${COWORK_PROXY_HOST:-}"
+PROXY_PORT="${COWORK_PROXY_PORT:-7890}"
+CUSTOM_MOUNT="${COWORK_MOUNT:-}"
+
+# PATH prefix for commands executed in VM (needed for non-login shells)
+VM_PATH_PREFIX='export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH" &&'
 
 # Colors
 RED='\033[0;31m'
@@ -57,6 +70,77 @@ vm_status() {
     fi
 }
 
+# Execute command in VM with cd warning suppression
+# Usage: vm_exec command args (without --)
+vm_exec() {
+    (limactl shell "$VM_NAME" -- "$@") 2>&1 | { grep -v "cd:.*No such file or directory" || true; }
+}
+
+# Execute bash command in VM with cd warning suppression
+# Usage: vm_bash "command string"
+vm_bash() {
+    (limactl shell "$VM_NAME" -- bash -c "cd ~ 2>/dev/null; $1") 2>&1 | { grep -v "cd:.*No such file or directory" || true; }
+}
+
+# Generate runtime Lima config with dynamic settings
+generate_runtime_config() {
+    local config_file="$1"
+    local base_config="$PROJECT_DIR/sandbox.yaml"
+
+    # Read base config content
+    local config_content
+    config_content=$(cat "$base_config")
+
+    # Add custom mount if specified - insert into existing mounts array
+    if [ -n "$CUSTOM_MOUNT" ]; then
+        local host_path="${CUSTOM_MOUNT%%:*}"
+        local vm_path="${CUSTOM_MOUNT##*:}"
+
+        # Expand ~ in host path
+        host_path="${host_path/#\~/$HOME}"
+
+        # Ensure host directory exists
+        mkdir -p "$host_path"
+
+        # Create mount entry and insert after "mounts:" line using awk
+        config_content=$(printf '%s' "$config_content" | awk -v hp="$host_path" -v vp="$vm_path" '
+            /^mounts:/ {
+                print
+                print "  - location: \"" hp "\""
+                print "    writable: true"
+                print "    mountPoint: \"" vp "\""
+                next
+            }
+            { print }
+        ')
+        print_info "Added custom mount: $host_path -> $vm_path"
+    fi
+
+    # Add proxy configuration if specified - insert into existing env section
+    if [ -n "$PROXY_HOST" ]; then
+        local proxy_url="http://${PROXY_HOST}:${PROXY_PORT}"
+
+        # Insert after "env:" line using awk
+        config_content=$(printf '%s' "$config_content" | awk -v pu="$proxy_url" '
+            /^env:/ {
+                print
+                print "  HTTP_PROXY: \"" pu "\""
+                print "  HTTPS_PROXY: \"" pu "\""
+                print "  http_proxy: \"" pu "\""
+                print "  https_proxy: \"" pu "\""
+                print "  NO_PROXY: \"localhost,127.0.0.1\""
+                print "  no_proxy: \"localhost,127.0.0.1\""
+                next
+            }
+            { print }
+        ')
+        print_info "Added proxy configuration: $proxy_url"
+    fi
+
+    # Write to config file
+    printf '%s\n' "$config_content" > "$config_file"
+}
+
 # Initialize/Create VM
 cmd_init() {
     check_lima
@@ -74,11 +158,21 @@ cmd_init() {
         fi
     else
         # Create workspace directory on host
-        mkdir -p "$HOME/cowork-workspace"
+        mkdir -p "$HOME/Downloads/cowork-workspace"
 
-        # Create VM from config
-        print_info "Creating VM from sandbox.yaml..."
-        limactl start --name="$VM_NAME" "$PROJECT_DIR/sandbox.yaml"
+        # Generate runtime config with dynamic settings
+        local runtime_config
+        runtime_config=$(mktemp)
+        mv "$runtime_config" "${runtime_config}.yaml"
+        runtime_config="${runtime_config}.yaml"
+        generate_runtime_config "$runtime_config"
+
+        # Create VM from runtime config
+        print_info "Creating VM from sandbox.yaml (with runtime config)..."
+        limactl start --name="$VM_NAME" "$runtime_config"
+
+        # Cleanup temp config
+        rm -f "$runtime_config"
     fi
 
     print_success "VM initialized successfully!"
@@ -130,7 +224,7 @@ cmd_status() {
         echo "Environment:"
         echo "  Python: $(limactl shell "$VM_NAME" -- python3 --version 2>/dev/null | cut -d' ' -f2)"
         echo "  Node:   $(limactl shell "$VM_NAME" -- node --version 2>/dev/null)"
-        echo "  Claude: $(limactl shell "$VM_NAME" -- claude --version 2>/dev/null || echo 'not installed')"
+        echo "  Claude: $(limactl shell "$VM_NAME" -- bash -c "$VM_PATH_PREFIX claude --version" 2>/dev/null || echo 'not installed')"
         echo ""
         echo "Workspace: $WORKSPACE"
         echo "  Files: $(limactl shell "$VM_NAME" -- ls "$WORKSPACE" 2>/dev/null | wc -l | tr -d ' ') items"
@@ -148,8 +242,38 @@ cmd_shell() {
         exit 1
     fi
 
+    local workingdir=""
+
+    # Parse options
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workingdir|--wd)
+                shift
+                workingdir="$1"
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    # Determine workspace path
+    local vm_workspace="$WORKSPACE"
+
+    if [ -n "$workingdir" ]; then
+        workingdir="${workingdir/#\~/$HOME}"
+        if [[ "$workingdir" == "$HOME"* ]]; then
+            local relative_path="${workingdir#$HOME}"
+            vm_workspace="/tmp/lima${relative_path}"
+        else
+            print_error "workingdir must be under home directory (~)"
+            exit 1
+        fi
+    fi
+
     print_info "Entering VM shell (exit with 'exit' or Ctrl+D)..."
-    limactl shell "$VM_NAME"
+    limactl shell --workdir "$vm_workspace" "$VM_NAME"
 }
 
 # Run Claude interactively in VM
@@ -162,14 +286,59 @@ cmd_claude() {
         exit 1
     fi
 
+    local workingdir=""
+    local skip_permissions=true
+
+    # Parse cowork-specific flags first
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workingdir|--wd)
+                shift
+                workingdir="$1"
+                shift
+                ;;
+            --no-dangerously-skip-permissions)
+                skip_permissions=false
+                shift
+                ;;
+            *)
+                # Stop parsing, rest goes to Claude
+                break
+                ;;
+        esac
+    done
+
     # Determine actual workspace path in VM
     local vm_workspace="$WORKSPACE"
-    if ! limactl shell "$VM_NAME" -- test -d "$WORKSPACE" 2>/dev/null; then
-        # Fallback to home-mounted cowork-workspace
-        vm_workspace="$HOME/cowork-workspace"
+
+    if [ -n "$workingdir" ]; then
+        # --workingdir specified: convert host path to VM path
+        workingdir="${workingdir/#\~/$HOME}"
+
+        if [[ "$workingdir" == "$HOME"* ]]; then
+            local relative_path="${workingdir#$HOME}"
+            vm_workspace="/tmp/lima${relative_path}"
+        else
+            print_error "workingdir must be under home directory (~)"
+            exit 1
+        fi
+
+        # Create directory if not exists
+        vm_exec mkdir -p "$vm_workspace"
+    elif ! vm_exec test -d "$WORKSPACE" 2>/dev/null; then
+        # Fallback to home-mounted cowork-workspace (via /tmp/lima mount)
+        vm_workspace="/tmp/lima/Downloads/cowork-workspace"
     fi
 
-    print_info "Starting Claude Code in VM..."
+
+    # Ensure Claude config is linked to host (for existing VMs that don't have the symlink)
+    vm_bash "
+        if [ -d /tmp/lima/.claude ] && [ ! -L ~/.claude ]; then
+            rm -rf ~/.claude 2>/dev/null || true
+            ln -sf /tmp/lima/.claude ~/.claude
+        fi
+    " >/dev/null 2>&1 || true
+
     # Build environment variables for Claude API
     local env_vars=""
     if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
@@ -178,7 +347,16 @@ cmd_claude() {
     if [ -n "$ANTHROPIC_BASE_URL" ]; then
         env_vars="${env_vars}ANTHROPIC_BASE_URL='$ANTHROPIC_BASE_URL' "
     fi
-    limactl shell "$VM_NAME" -- bash -c "cd $vm_workspace && ${env_vars}claude --dangerously-skip-permissions"
+
+    # Build Claude options
+    local claude_opts=""
+    if [ "$skip_permissions" = true ]; then
+        claude_opts="--dangerously-skip-permissions"
+    fi
+
+    # Pass all remaining arguments to Claude CLI (interactive mode)
+    # Keep raw output without filtering for interactive use
+    limactl shell --workdir "$vm_workspace" "$VM_NAME" -- bash -c "cd ~ 2>/dev/null; $VM_PATH_PREFIX cd $vm_workspace && ${env_vars}claude $claude_opts $(printf '%q ' "$@")"
 }
 
 # Ask Claude (supports all Claude CLI arguments)
@@ -187,8 +365,8 @@ cmd_ask() {
     check_lima
 
     local project=""
-    local claude_args=""
-    local prompt=""
+    local workingdir=""
+    local skip_permissions=true
 
     # Parse cowork-specific flags first
     while [ $# -gt 0 ]; do
@@ -198,8 +376,17 @@ cmd_ask() {
                 project="$1"
                 shift
                 ;;
+            --workingdir|--wd)
+                shift
+                workingdir="$1"
+                shift
+                ;;
+            --no-dangerously-skip-permissions)
+                skip_permissions=false
+                shift
+                ;;
             *)
-                # Collect remaining arguments as Claude args + prompt
+                # Stop parsing, rest goes to Claude
                 break
                 ;;
         esac
@@ -207,13 +394,26 @@ cmd_ask() {
 
     # Everything else goes to Claude
     if [ $# -eq 0 ]; then
-        print_error "Usage: cowork ask [--project <name>] [claude options] \"prompt\""
+        print_error "Usage: cowork ask [options] [claude options] \"prompt\""
+        print_error ""
+        print_error "Cowork Options:"
+        print_error "  --project <name>                   Work in /workspace/<name>"
+        print_error "  --workingdir <path>                Work in host path (e.g., ~/Projects/app)"
+        print_error "  --no-dangerously-skip-permissions  Don't auto-add --dangerously-skip-permissions"
+        print_error ""
+        print_error "All Claude Code options are supported (passed through directly):"
+        print_error "  -c, --continue        Continue previous conversation"
+        print_error "  --plan                Plan mode (no execution)"
+        print_error "  --model <model>       Specify model"
+        print_error "  --allowedTools <t>    Specify allowed tools"
+        print_error "  ... and more (see 'claude --help')"
+        print_error ""
         print_error "Examples:"
         print_error "  cowork ask \"write hello world\""
-        print_error "  cowork ask -c \"continue this\""
         print_error "  cowork ask --project myapp \"create a flask app\""
-        print_error "  cowork ask --model opus \"complex task\""
-        print_error "  cowork ask --max-budget-usd 1.0 \"expensive task\""
+        print_error "  cowork ask --workingdir ~/Projects/app \"add tests\""
+        print_error "  cowork ask --plan \"design a REST API\""
+        print_error "  cowork ask -c \"continue this\""
         exit 1
     fi
 
@@ -225,17 +425,47 @@ cmd_ask() {
 
     # Determine actual workspace path in VM
     local vm_workspace="$WORKSPACE"
-    if ! limactl shell "$VM_NAME" -- test -d "$WORKSPACE" 2>/dev/null; then
-        # Fallback to home-mounted cowork-workspace
-        vm_workspace="$HOME/cowork-workspace"
-    fi
 
-    # If project is specified, use project directory
-    if [ -n "$project" ]; then
+    if [ -n "$workingdir" ]; then
+        # --workingdir specified: convert host path to VM path
+        # Expand ~ to $HOME
+        workingdir="${workingdir/#\~/$HOME}"
+
+        # Convert host path to VM path via /tmp/lima mount
+        # /Users/xxx/... -> /tmp/lima/...
+        if [[ "$workingdir" == "$HOME"* ]]; then
+            # Remove $HOME prefix and prepend /tmp/lima
+            local relative_path="${workingdir#$HOME}"
+            vm_workspace="/tmp/lima${relative_path}"
+        else
+            print_error "workingdir must be under home directory (~)"
+            exit 1
+        fi
+
+        # Create directory if not exists
+        vm_exec mkdir -p "$vm_workspace"
+    elif [ -n "$project" ]; then
+        # --project specified: use /workspace/<project>
+        if ! vm_exec test -d "$WORKSPACE" 2>/dev/null; then
+            vm_workspace="/tmp/lima/Downloads/cowork-workspace"
+        fi
         vm_workspace="$vm_workspace/$project"
         # Create project directory if not exists
-        limactl shell "$VM_NAME" -- mkdir -p "$vm_workspace"
+        vm_exec mkdir -p "$vm_workspace"
+    else
+        # Default: use $WORKSPACE
+        if ! vm_exec test -d "$WORKSPACE" 2>/dev/null; then
+            vm_workspace="/tmp/lima/Downloads/cowork-workspace"
+        fi
     fi
+
+    # Ensure Claude config is linked to host (for existing VMs that don't have the symlink)
+    vm_bash "
+        if [ -d /tmp/lima/.claude ] && [ ! -L ~/.claude ]; then
+            rm -rf ~/.claude 2>/dev/null || true
+            ln -sf /tmp/lima/.claude ~/.claude
+        fi
+    " >/dev/null 2>&1 || true
 
     # Build environment variables for Claude API
     local env_vars=""
@@ -246,10 +476,15 @@ cmd_ask() {
         env_vars="${env_vars}ANTHROPIC_BASE_URL='$ANTHROPIC_BASE_URL' "
     fi
 
-    # Pass all arguments to Claude CLI
-    # Note: Always use -p (print mode) for non-interactive operation
-    # Note: Always use --dangerously-skip-permissions for sandbox
-    limactl shell "$VM_NAME" -- bash -c "cd $vm_workspace && ${env_vars}claude -p --dangerously-skip-permissions $(printf '%q ' "$@")"
+    # Build Claude command
+    # Default: add -p (print mode) and --dangerously-skip-permissions (sandbox default)
+    local claude_opts="-p"
+    if [ "$skip_permissions" = true ]; then
+        claude_opts="$claude_opts --dangerously-skip-permissions"
+    fi
+
+    # Pass all remaining arguments to Claude CLI (supports all Claude options)
+    vm_bash "$VM_PATH_PREFIX cd $vm_workspace && ${env_vars}claude $claude_opts $(printf '%q ' "$@")"
 }
 
 # Execute command in VM
@@ -267,7 +502,7 @@ cmd_exec() {
         exit 1
     fi
 
-    limactl shell "$VM_NAME" -- bash -c "$*"
+    vm_bash "source ~/.bashrc 2>/dev/null; $*"
 }
 
 # Delete VM
@@ -283,6 +518,270 @@ cmd_delete() {
         print_success "VM deleted"
     else
         print_info "Cancelled"
+    fi
+}
+
+# Configure VM (modify mount/proxy without rebuilding)
+cmd_config() {
+    check_lima
+
+    local lima_config="$HOME/.lima/$VM_NAME/lima.yaml"
+    local show_only=true
+    local new_mount=""
+    local new_proxy=""
+    local remove_proxy=false
+    local remove_mount=""
+
+    # Parse options
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --mount)
+                shift
+                new_mount="$1"
+                show_only=false
+                shift
+                ;;
+            --remove-mount)
+                shift
+                remove_mount="$1"
+                show_only=false
+                shift
+                ;;
+            --proxy)
+                shift
+                new_proxy="$1"
+                show_only=false
+                shift
+                ;;
+            --no-proxy)
+                remove_proxy=true
+                show_only=false
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    # Check if VM exists
+    if [ ! -f "$lima_config" ]; then
+        print_error "VM '$VM_NAME' not found. Run 'cowork init' first."
+        exit 1
+    fi
+
+    # Show current config
+    if [ "$show_only" = true ]; then
+        print_header
+        echo "VM: $VM_NAME"
+        echo "Config: $lima_config"
+        echo ""
+        echo "Mounts:"
+        # Extract all mounts using awk - improved version
+        awk '
+            BEGIN { in_mounts=0; loc=""; writable="false"; mp="" }
+            /^mounts:/ { in_mounts=1; next }
+            /^[a-zA-Z]/ && !/^[[:space:]]/ && in_mounts {
+                # End of mounts section - print last entry
+                if (loc != "") {
+                    printf "  %s -> ", loc
+                    if (mp != "") printf "%s", mp
+                    else if (loc == "~") printf "~ (home dir)"
+                    else printf "%s", loc
+                    if (writable == "true") printf " [rw]"
+                    else printf " [ro]"
+                    printf "\n"
+                    loc = ""
+                }
+                in_mounts=0
+            }
+            in_mounts && /^[[:space:]]*- location:/ {
+                # Print previous mount if exists
+                if (loc != "") {
+                    printf "  %s -> ", loc
+                    if (mp != "") printf "%s", mp
+                    else if (loc == "~") printf "~ (home dir)"
+                    else printf "%s", loc
+                    if (writable == "true") printf " [rw]"
+                    else printf " [ro]"
+                    printf "\n"
+                }
+                # Start new mount entry
+                gsub(/.*location: *"?/, ""); gsub(/".*/, "")
+                loc = $0; writable = "false"; mp = ""
+            }
+            in_mounts && /^[[:space:]]*writable:/ {
+                gsub(/.*writable: */, ""); gsub(/[[:space:]].*/, "")
+                writable = $0
+            }
+            in_mounts && /^[[:space:]]*mountPoint:/ {
+                gsub(/.*mountPoint: *"?/, ""); gsub(/".*/, "")
+                mp = $0
+            }
+            END {
+                # Print last mount if still in mounts section (file ends in mounts)
+                if (in_mounts && loc != "") {
+                    printf "  %s -> ", loc
+                    if (mp != "") printf "%s", mp
+                    else if (loc == "~") printf "~ (home dir)"
+                    else printf "%s", loc
+                    if (writable == "true") printf " [rw]"
+                    else printf " [ro]"
+                    printf "\n"
+                }
+            }
+        ' "$lima_config"
+        echo ""
+        echo "Proxy:"
+        grep -E "^\s*(HTTP_PROXY|http_proxy):" "$lima_config" | head -1 | sed 's/.*: *"*/  /' | sed 's/"*$//' || echo "  (not configured)"
+        echo ""
+        echo "To modify:"
+        echo "  cowork config --mount <host_path>:<vm_path>  # Add mount"
+        echo "  cowork config --remove-mount <vm_path>       # Remove mount by VM path"
+        echo "  cowork config --proxy <host:port>            # Set proxy"
+        echo "  cowork config --no-proxy                     # Remove proxy"
+        return
+    fi
+
+    # Stop VM before modifying config
+    local status=$(vm_status)
+    local was_running=false
+    if [ "$status" == "Running" ]; then
+        was_running=true
+        print_info "Stopping VM to apply changes..."
+        limactl stop "$VM_NAME" --force
+    fi
+
+    # Modify mount using awk
+    if [ -n "$new_mount" ]; then
+        local host_path="${new_mount%%:*}"
+        local vm_path="${new_mount##*:}"
+        host_path="${host_path/#\~/$HOME}"
+
+        # Ensure host directory exists
+        mkdir -p "$host_path"
+
+        # Create temp file
+        local tmp_config=$(mktemp)
+
+        # Add new mount entry after "mounts:" line
+        awk -v hp="$host_path" -v vp="$vm_path" '
+            /^mounts:/ {
+                print
+                print "  - location: \"" hp "\""
+                print "    writable: true"
+                print "    mountPoint: \"" vp "\""
+                next
+            }
+            { print }
+        ' "$lima_config" > "$tmp_config"
+
+        mv "$tmp_config" "$lima_config"
+        print_info "Added mount: $host_path -> $vm_path"
+    fi
+
+    # Remove mount by VM path using awk
+    if [ -n "$remove_mount" ]; then
+        local tmp_config=$(mktemp)
+
+        # Use awk to remove the mount entry matching the VM path
+        # Buffer each mount entry, check mountPoint, then decide to print or skip
+        awk -v target="$remove_mount" '
+            BEGIN { in_mounts=0; entry=""; has_target=0 }
+
+            /^mounts:/ { in_mounts=1; print; next }
+
+            # End of mounts section
+            /^[a-zA-Z]/ && !/^[[:space:]]/ && in_mounts {
+                # Flush last entry if not target
+                if (entry != "" && !has_target) printf "%s", entry
+                in_mounts=0
+                entry=""
+                has_target=0
+                print
+                next
+            }
+
+            # New mount entry starts
+            in_mounts && /^[[:space:]]*- location:/ {
+                # Flush previous entry if not target
+                if (entry != "" && !has_target) printf "%s", entry
+                # Start new entry
+                entry = $0 "\n"
+                has_target = 0
+                next
+            }
+
+            # Inside a mount entry
+            in_mounts && entry != "" {
+                entry = entry $0 "\n"
+                # Check if mountPoint matches target
+                if (/mountPoint:/) {
+                    mp = $0
+                    gsub(/.*mountPoint: *"?/, "", mp)
+                    gsub(/".*/, "", mp)
+                    if (mp == target) has_target = 1
+                }
+                next
+            }
+
+            { print }
+
+            END {
+                # Flush last entry if not target
+                if (entry != "" && !has_target) printf "%s", entry
+            }
+        ' "$lima_config" > "$tmp_config"
+
+        mv "$tmp_config" "$lima_config"
+        print_info "Removed mount with VM path: $remove_mount"
+    fi
+
+    # Modify proxy using awk
+    if [ -n "$new_proxy" ]; then
+        local proxy_host="${new_proxy%%:*}"
+        local proxy_port="${new_proxy##*:}"
+        local proxy_url="http://${proxy_host}:${proxy_port}"
+
+        local tmp_config=$(mktemp)
+
+        # First remove old proxy lines
+        grep -v -E "^[[:space:]]*(HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy):" "$lima_config" > "$tmp_config"
+
+        # Add new proxy entries after "env:" line
+        awk -v pu="$proxy_url" '
+            /^env:/ {
+                print
+                print "  HTTP_PROXY: \"" pu "\""
+                print "  HTTPS_PROXY: \"" pu "\""
+                print "  http_proxy: \"" pu "\""
+                print "  https_proxy: \"" pu "\""
+                print "  NO_PROXY: \"localhost,127.0.0.1\""
+                print "  no_proxy: \"localhost,127.0.0.1\""
+                next
+            }
+            { print }
+        ' "$tmp_config" > "$lima_config"
+
+        rm -f "$tmp_config"
+        print_info "Updated proxy: $proxy_url"
+    fi
+
+    # Remove proxy
+    if [ "$remove_proxy" = true ]; then
+        local tmp_config=$(mktemp)
+        grep -v -E "^[[:space:]]*(HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy|NO_PROXY|no_proxy):" "$lima_config" > "$tmp_config"
+        mv "$tmp_config" "$lima_config"
+        print_info "Removed proxy configuration"
+    fi
+
+    # Restart VM if it was running
+    if [ "$was_running" = true ]; then
+        print_info "Starting VM with new configuration..."
+        limactl start "$VM_NAME"
+        print_success "Configuration applied"
+    else
+        print_success "Configuration updated. Run 'cowork start' to apply."
     fi
 }
 
@@ -330,72 +829,142 @@ cmd_proxy() {
     $cmd
 }
 
+# List all cowork VMs
+cmd_list() {
+    check_lima
+
+    print_header
+    echo ""
+    echo "Cowork Sandbox VMs:"
+    echo ""
+
+    # Get all VMs and filter/display
+    local found=false
+    while IFS= read -r line; do
+        if [ -n "$line" ]; then
+            found=true
+            local name=$(echo "$line" | jq -r '.name // "unknown"')
+            local status=$(echo "$line" | jq -r '.status // "unknown"')
+            local arch=$(echo "$line" | jq -r '.arch // "unknown"')
+            local cpus=$(echo "$line" | jq -r '.cpus // 0')
+            local memory=$(echo "$line" | jq -r 'if .memory then (.memory / 1024 / 1024 / 1024 | floor) else 0 end')
+            local disk=$(echo "$line" | jq -r 'if .disk then (.disk / 1024 / 1024 / 1024 | floor) else 0 end')
+
+            # Status color
+            local status_color="$RED"
+            if [ "$status" == "Running" ]; then
+                status_color="$GREEN"
+            elif [ "$status" == "Stopped" ]; then
+                status_color="$YELLOW"
+            fi
+
+            printf "  %-20s ${status_color}%-10s${NC} %s, %s CPUs, %sG RAM, %sG Disk\n" \
+                "$name" "$status" "$arch" "$cpus" "$memory" "$disk"
+        fi
+    done < <(limactl list --json 2>/dev/null | jq -c 'if type == "array" then .[] else . end')
+
+    if [ "$found" = false ]; then
+        echo "  No VMs found"
+    fi
+    echo ""
+}
+
 # Show help
 cmd_help() {
     print_header
     echo ""
-    echo "Usage: cowork <command> [arguments]"
+    echo "Usage: cowork [options] <command> [arguments]"
+    echo ""
+    echo "Global Options:"
+    echo "  --vm-name <name>      VM name (default: sandbox, or \$COWORK_VM_NAME)"
+    echo "  --proxy <host:port>   Proxy for VM network (only for init)"
+    echo "  --mount <host:vm>     Custom mount directory (only for init)"
     echo ""
     echo "Commands:"
-    echo "  init      Initialize/create the sandbox VM"
-    echo "  start     Start the sandbox VM"
-    echo "  stop      Stop the sandbox VM"
-    echo "  status    Show VM status and info"
+    echo "  init      Create and start a sandbox VM"
+    echo "  list      List all VMs"
+    echo "  start     Start VM"
+    echo "  stop      Stop VM"
+    echo "  status    Show VM status"
+    echo "  config    View/modify VM configuration"
+    echo "  delete    Delete VM"
+    echo ""
     echo "  shell     Enter VM shell"
-    echo "  claude    Start Claude Code interactively in VM"
-    echo "  ask       Ask Claude (non-interactive mode, supports all Claude CLI options)"
-    echo "  exec      Execute a command in VM"
-    echo "  proxy     Start network proxy monitor (port 7890)"
-    echo "  delete    Delete the sandbox VM"
-    echo "  help      Show this help message"
+    echo "  exec      Run command in VM"
+    echo "  claude    Interactive Claude session"
+    echo "  ask       Non-interactive Claude query"
     echo ""
-    echo "Ask Command Usage:"
-    echo "  cowork ask [--project <name>] [claude options] \"prompt\""
+    echo "Claude/Ask Options:"
+    echo "  --workingdir <path>                Work in host path (e.g., ~/Projects/app)"
+    echo "  --project <name>                   Work in /workspace/<name>"
+    echo "  --no-dangerously-skip-permissions  Don't auto-add --dangerously-skip-permissions"
+    echo "  (All Claude Code CLI options are passed through directly)"
     echo ""
-    echo "  Cowork-specific options:"
-    echo "    --project <name>  Work in project directory (replaces old -p flag)"
-    echo "    --proj <name>     Short form of --project"
-    echo ""
-    echo "  All Claude CLI options are supported, including:"
-    echo "    -c, --continue                Continue previous conversation"
-    echo "    --model <model>               Use specific model (sonnet/opus/haiku)"
-    echo "    --max-budget-usd <amount>     Set budget limit"
-    echo "    --system-prompt <prompt>      Custom system prompt"
-    echo "    --add-dir <dirs...>           Additional directories"
-    echo "    --allowed-tools <tools...>    Specify allowed tools"
-    echo "    --json-schema <schema>        Structured output"
-    echo "    --mcp-config <configs...>     MCP server configs"
-    echo "    ... and many more (see 'claude --help' for full list)"
+    echo "Config Options:"
+    echo "  --mount <host:vm>       Add mount directory"
+    echo "  --remove-mount <vm>     Remove mount by VM path"
+    echo "  --proxy <host:port>     Set proxy"
+    echo "  --no-proxy              Remove proxy"
     echo ""
     echo "Examples:"
-    echo "  cowork init                                    # Create and start VM"
-    echo "  cowork ask \"write hello world\"                 # New conversation"
-    echo "  cowork ask -c \"continue this\"                  # Continue conversation"
-    echo "  cowork ask --project myapp \"create flask app\"  # Work in project"
-    echo "  cowork ask --project myapp -c \"add tests\"      # Continue in project"
-    echo "  cowork ask --model opus \"complex task\"         # Use Opus model"
-    echo "  cowork ask --max-budget-usd 1.0 \"task\"         # Set budget limit"
-    echo "  cowork ask --system-prompt \"You are X\" \"task\" # Custom prompt"
-    echo "  cowork claude                                  # Interactive Claude"
-    echo "  cowork exec \"python3 hello.py\"                 # Run command in VM"
-    echo "  cowork shell                                   # Enter VM shell"
-    echo "  cowork proxy                                   # Monitor network traffic"
-    echo "  cowork proxy -l proxy.log -v                   # Monitor with logging"
+    echo "  cowork init"
+    echo "  cowork claude                                  # Interactive mode"
+    echo "  cowork claude --permission-mode plan           # Plan mode"
+    echo "  cowork ask \"write hello world\""
+    echo "  cowork ask --workingdir ~/Projects/app \"add tests\""
+    echo "  cowork ask --project myapp \"create flask app\""
+    echo "  cowork ask --plan \"design a REST API\""
+    echo "  cowork config --mount ~/project:/project"
+    echo "  cowork --vm-name dev init"
     echo ""
-    echo "Environment variables:"
+    echo "Environment Variables:"
     echo "  COWORK_VM_NAME        VM name (default: sandbox)"
-    echo "  COWORK_WORKSPACE      Workspace path (default: /workspace)"
-    echo "  ANTHROPIC_AUTH_TOKEN  API token for Claude Code"
-    echo "  ANTHROPIC_BASE_URL    Base URL for Claude API"
-    echo ""
-    echo "Note: The old '-p <project>' syntax is deprecated. Use '--project <name>' instead."
+    echo "  COWORK_WORKSPACE      Default workspace path (default: /workspace)"
+    echo "  COWORK_PROXY_HOST     Proxy host"
+    echo "  COWORK_PROXY_PORT     Proxy port (default: 7890)"
+    echo "  COWORK_MOUNT          Custom mount (format: host:vm)"
+    echo "  ANTHROPIC_AUTH_TOKEN  Claude API token"
+    echo "  ANTHROPIC_BASE_URL    Claude API endpoint"
     echo ""
 }
 
 # Main command dispatcher
+# Parse global options first
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --proxy)
+            shift
+            # Parse host:port format
+            if [[ "$1" == *:* ]]; then
+                PROXY_HOST="${1%%:*}"
+                PROXY_PORT="${1##*:}"
+            else
+                PROXY_HOST="$1"
+            fi
+            shift
+            ;;
+        --mount)
+            shift
+            CUSTOM_MOUNT="$1"
+            shift
+            ;;
+        --vm-name)
+            shift
+            VM_NAME="$1"
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 case "${1:-help}" in
     init)
         cmd_init
+        ;;
+    list|ls)
+        cmd_list
         ;;
     start)
         cmd_start
@@ -406,11 +975,17 @@ case "${1:-help}" in
     status)
         cmd_status
         ;;
+    config)
+        shift
+        cmd_config "$@"
+        ;;
     shell)
-        cmd_shell
+        shift
+        cmd_shell "$@"
         ;;
     claude)
-        cmd_claude
+        shift
+        cmd_claude "$@"
         ;;
     ask)
         shift
