@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/jingmca/vmcowork/main/install.sh | 
 
 This will:
 - Install Lima and jq (via Homebrew or direct download)
-- Clone the repository to `~/.cowork-sandbox/`
+- Clone the repository to `~/.vmcowork/`
 - Download pre-built VM package (if available) or build from scratch
 - Configure PATH automatically
 

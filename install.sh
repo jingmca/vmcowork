@@ -33,7 +33,7 @@ NC='\033[0m'
 print_banner() {
     echo ""
     echo -e "${BLUE}╭─────────────────────────────────────╮${NC}"
-    echo -e "${BLUE}│     VMCowork Installer        │${NC}"
+    echo -e "${BLUE}│     VMCowork Installer              │${NC}"
     echo -e "${BLUE}│     Claude Code in Isolated VM      │${NC}"
     echo -e "${BLUE}╰─────────────────────────────────────╯${NC}"
     echo ""
