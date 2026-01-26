@@ -9,8 +9,10 @@ const path = require('path');
 
 const scriptPath = path.join(__dirname, 'claude-sandbox.sh');
 
+// Use 'inherit' to pass through stdin/stdout/stderr from parent process
+// This allows proper piping when spawned by another process (like CUI)
 const child = spawn('bash', [scriptPath, ...process.argv.slice(2)], {
-  stdio: 'inherit',
+  stdio: [process.stdin, process.stdout, process.stderr],
   env: process.env
 });
 
