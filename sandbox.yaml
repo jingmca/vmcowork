@@ -92,12 +92,16 @@ provision:
       # Install Claude Code CLI
       npm install -g @anthropic-ai/claude-code
 
-      # Link host's Claude config to VM (so Claude Code uses same settings)
-      # Host's ~ is mounted at /tmp/lima
-      if [ -d /tmp/lima/.claude ]; then
-        ln -sf /tmp/lima/.claude ~/.claude
-        echo "Linked ~/.claude to host config"
+      # 检查宿主机的 .vmcowork 目录
+      if [ ! -d /tmp/lima/.vmcowork ]; then
+        echo "Creating ~/.vmcowork on host for isolated Claude config..."
+        mkdir -p /tmp/lima/.vmcowork
       fi
+
+      # 软链 VM 的 ~/.claude 到宿主机的 ~/.vmcowork
+      # 这样 VM 的 Claude 配置与宿主机的 ~/.claude 完全隔离
+      ln -sfn /tmp/lima/.vmcowork ~/.claude
+      echo "Linked ~/.claude -> /tmp/lima/.vmcowork (isolated from host)"
 
       echo "=== User setup complete ==="
 

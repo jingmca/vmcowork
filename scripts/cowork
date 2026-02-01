@@ -341,8 +341,11 @@ cmd_claude() {
 
     # Build environment variables for Claude API
     local env_vars=""
+    if [ -n "$ANTHROPIC_API_KEY" ]; then
+        env_vars="ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' "
+    fi
     if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
-        env_vars="ANTHROPIC_AUTH_TOKEN='$ANTHROPIC_AUTH_TOKEN' "
+        env_vars="${env_vars}ANTHROPIC_AUTH_TOKEN='$ANTHROPIC_AUTH_TOKEN' "
     fi
     if [ -n "$ANTHROPIC_BASE_URL" ]; then
         env_vars="${env_vars}ANTHROPIC_BASE_URL='$ANTHROPIC_BASE_URL' "
@@ -469,8 +472,11 @@ cmd_ask() {
 
     # Build environment variables for Claude API
     local env_vars=""
+    if [ -n "$ANTHROPIC_API_KEY" ]; then
+        env_vars="ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' "
+    fi
     if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
-        env_vars="ANTHROPIC_AUTH_TOKEN='$ANTHROPIC_AUTH_TOKEN' "
+        env_vars="${env_vars}ANTHROPIC_AUTH_TOKEN='$ANTHROPIC_AUTH_TOKEN' "
     fi
     if [ -n "$ANTHROPIC_BASE_URL" ]; then
         env_vars="${env_vars}ANTHROPIC_BASE_URL='$ANTHROPIC_BASE_URL' "
@@ -484,7 +490,8 @@ cmd_ask() {
     fi
 
     # Pass all remaining arguments to Claude CLI (supports all Claude options)
-    vm_bash "$VM_PATH_PREFIX cd $vm_workspace && ${env_vars}claude $claude_opts $(printf '%q ' "$@")"
+    # Use limactl shell directly (not vm_bash) to avoid pipe buffering issues
+    limactl shell --workdir "$vm_workspace" "$VM_NAME" -- bash -c "cd ~ 2>/dev/null; $VM_PATH_PREFIX cd $vm_workspace && ${env_vars}claude $claude_opts $(printf '%q ' "$@")"
 }
 
 # Execute command in VM
