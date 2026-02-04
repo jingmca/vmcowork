@@ -528,6 +528,153 @@ cmd_delete() {
     fi
 }
 
+# Export VM as pre-built image
+cmd_export() {
+    check_lima
+
+    local output_file=""
+    local format="tar.gz"
+
+    # Parse options
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -o|--output)
+                shift
+                output_file="$1"
+                shift
+                ;;
+            --format)
+                shift
+                format="$1"
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    # Default output file name
+    if [ -z "$output_file" ]; then
+        local timestamp=$(date +%Y%m%d_%H%M%S)
+        output_file="$HOME/Downloads/cowork-sandbox-${timestamp}.tar.gz"
+    fi
+
+    # Ensure output file has correct extension
+    if [[ "$output_file" != *.tar.gz ]] && [[ "$output_file" != *.tgz ]]; then
+        output_file="${output_file}.tar.gz"
+    fi
+
+    local status=$(vm_status)
+    if [ "$status" == "NotFound" ]; then
+        print_error "VM '$VM_NAME' not found. Nothing to export."
+        exit 1
+    fi
+
+    print_header
+    print_info "Exporting VM '$VM_NAME' as pre-built image..."
+    echo ""
+
+    # Stop VM if running (required for clean export)
+    local was_running=false
+    if [ "$status" == "Running" ]; then
+        was_running=true
+        print_info "Stopping VM for clean export..."
+        limactl stop "$VM_NAME"
+        sleep 2
+    fi
+
+    local lima_vm_dir="$HOME/.lima/$VM_NAME"
+
+    if [ ! -d "$lima_vm_dir" ]; then
+        print_error "VM directory not found: $lima_vm_dir"
+        exit 1
+    fi
+
+    # Create temporary directory for packaging
+    local tmp_dir=$(mktemp -d)
+    local vm_export_dir="$tmp_dir/vm"
+    mkdir -p "$vm_export_dir"
+
+    print_info "Copying VM files..."
+
+    # Copy essential VM files
+    # - basedisk: base disk image (if exists)
+    # - diffdisk: differential disk with changes
+    # - lima.yaml: VM configuration
+    # - cidata.iso: cloud-init data (if exists)
+
+    if [ -f "$lima_vm_dir/basedisk" ]; then
+        cp "$lima_vm_dir/basedisk" "$vm_export_dir/"
+        print_info "  Copied basedisk"
+    fi
+
+    if [ -f "$lima_vm_dir/diffdisk" ]; then
+        cp "$lima_vm_dir/diffdisk" "$vm_export_dir/"
+        print_info "  Copied diffdisk"
+    fi
+
+    if [ -f "$lima_vm_dir/lima.yaml" ]; then
+        cp "$lima_vm_dir/lima.yaml" "$vm_export_dir/"
+        print_info "  Copied lima.yaml"
+    fi
+
+    if [ -f "$lima_vm_dir/cidata.iso" ]; then
+        cp "$lima_vm_dir/cidata.iso" "$vm_export_dir/"
+        print_info "  Copied cidata.iso"
+    fi
+
+    # Copy any other essential files
+    for file in "$lima_vm_dir"/*.yaml "$lima_vm_dir"/*.json; do
+        if [ -f "$file" ] && [ "$(basename "$file")" != "lima.yaml" ]; then
+            cp "$file" "$vm_export_dir/" 2>/dev/null || true
+        fi
+    done
+
+    # Create metadata file
+    cat > "$vm_export_dir/export-metadata.json" << EOF
+{
+    "exported_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "vm_name": "$VM_NAME",
+    "host_arch": "$(uname -m)",
+    "host_os": "$(uname -s)",
+    "lima_version": "$(limactl --version 2>/dev/null | head -1 || echo 'unknown')"
+}
+EOF
+
+    print_info "Creating archive..."
+
+    # Create tar.gz archive
+    tar -czf "$output_file" -C "$tmp_dir" vm
+
+    # Cleanup
+    rm -rf "$tmp_dir"
+
+    # Calculate file size
+    local file_size=$(du -h "$output_file" | cut -f1)
+
+    # Restart VM if it was running
+    if [ "$was_running" = true ]; then
+        print_info "Restarting VM..."
+        limactl start "$VM_NAME"
+    fi
+
+    echo ""
+    print_success "VM exported successfully!"
+    echo ""
+    echo "  Output: $output_file"
+    echo "  Size:   $file_size"
+    echo ""
+    echo "To import this image on another machine:"
+    echo ""
+    echo "  # Option 1: Using install.sh"
+    echo "  ./install.sh --import $output_file"
+    echo ""
+    echo "  # Option 2: Using environment variable"
+    echo "  COWORK_IMPORT_IMAGE=$output_file ./install.sh"
+    echo ""
+}
+
 # Configure VM (modify mount/proxy without rebuilding)
 cmd_config() {
     check_lima
@@ -876,6 +1023,325 @@ cmd_list() {
     echo ""
 }
 
+# ============================================================================
+# CUI (Claude UI) Commands
+# ============================================================================
+
+CUI_REPO="${COWORK_CUI_REPO:-https://github.com/jingmca/cui.git}"
+CUI_DIR="/workspace/cui"
+CUI_SERVER_PORT="${COWORK_CUI_PORT:-3001}"
+CUI_WEB_PORT="${COWORK_CUI_WEB_PORT:-3000}"
+
+# Deploy CUI to sandbox /workspace
+cmd_cui_deploy() {
+    check_lima
+
+    local status=$(vm_status)
+    if [ "$status" != "Running" ]; then
+        print_info "Starting VM..."
+        cmd_start
+    fi
+
+    print_info "Deploying CUI to $CUI_DIR..."
+
+    # Check if CUI is already deployed (use vm_bash to properly check)
+    if vm_bash "test -d $CUI_DIR/.git && echo EXISTS" 2>/dev/null | grep -q "EXISTS"; then
+        print_info "CUI already exists, updating..."
+        vm_bash "cd $CUI_DIR && git pull origin main"
+    else
+        print_info "Cloning CUI repository..."
+        vm_bash "mkdir -p /workspace && cd /workspace && rm -rf cui && git clone $CUI_REPO cui"
+    fi
+
+    # Verify clone succeeded
+    if ! vm_bash "test -d $CUI_DIR && echo EXISTS" 2>/dev/null | grep -q "EXISTS"; then
+        print_error "Failed to clone CUI repository"
+        exit 1
+    fi
+
+    # Install dependencies
+    print_info "Installing dependencies..."
+    vm_bash "$VM_PATH_PREFIX cd $CUI_DIR && npm install"
+
+    # Build the project
+    print_info "Building CUI..."
+    vm_bash "$VM_PATH_PREFIX cd $CUI_DIR && npm run build"
+
+    print_success "CUI deployed to $CUI_DIR"
+}
+
+# Start CUI server in sandbox (API only mode)
+cmd_cui_server() {
+    check_lima
+
+    local status=$(vm_status)
+    if [ "$status" != "Running" ]; then
+        print_error "VM is not running. Run 'cowork start' first."
+        exit 1
+    fi
+
+    # Check if CUI is deployed
+    if ! vm_bash "test -d $CUI_DIR && echo EXISTS" 2>/dev/null | grep -q "EXISTS"; then
+        print_error "CUI not deployed. Run 'cowork cui-deploy' first."
+        exit 1
+    fi
+
+    local action="${1:-start}"
+
+    case "$action" in
+        start)
+            print_info "Starting CUI server on port $CUI_SERVER_PORT..."
+
+            # Build environment variables for API
+            local env_vars=""
+            if [ -n "$ANTHROPIC_API_KEY" ]; then
+                env_vars="ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' "
+            fi
+            if [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+                env_vars="${env_vars}ANTHROPIC_AUTH_TOKEN='$ANTHROPIC_AUTH_TOKEN' "
+            fi
+            if [ -n "$ANTHROPIC_BASE_URL" ]; then
+                env_vars="${env_vars}ANTHROPIC_BASE_URL='$ANTHROPIC_BASE_URL' "
+            fi
+
+            # Stop any existing server
+            vm_bash "pkill -f 'tsx.*server' 2>/dev/null || true"
+            sleep 1
+
+            # Start server in background - run limactl in background to avoid blocking
+            (
+                limactl shell "$VM_NAME" -- bash -c "cd $CUI_DIR && export PATH=\"\$HOME/.npm-global/bin:\$HOME/.local/bin:\$PATH\" && ${env_vars}PORT=$CUI_SERVER_PORT API_ONLY=true nohup npm run dev:api > /tmp/cui-server.log 2>&1 &" 2>/dev/null
+            ) &
+            sleep 4
+
+            # Check if server started (200 or 401 both mean server is running)
+            local http_code
+            http_code=$(vm_bash "curl -s -o /dev/null -w '%{http_code}' http://localhost:$CUI_SERVER_PORT/api/health" 2>/dev/null)
+            if [ "$http_code" == "200" ] || [ "$http_code" == "401" ]; then
+                print_success "CUI server started on port $CUI_SERVER_PORT"
+
+                # Extract and display access token from logs
+                local token_line
+                token_line=$(vm_bash "grep -o 'token=[a-f0-9]*' /tmp/cui-server.log 2>/dev/null | tail -1")
+                if [ -n "$token_line" ]; then
+                    local token="${token_line#token=}"
+                    echo ""
+                    echo -e "  ${GREEN}Access URL:${NC} http://localhost:$CUI_WEB_PORT#token=$token"
+                    echo ""
+                fi
+
+                print_info "Logs: cowork exec 'tail -f /tmp/cui-server.log'"
+            else
+                print_info "Server starting... Check logs with: cowork exec 'tail -f /tmp/cui-server.log'"
+            fi
+            ;;
+        stop)
+            print_info "Stopping CUI server..."
+            vm_bash "pkill -f 'node.*cui.*server' 2>/dev/null || pkill -f 'tsx.*server' 2>/dev/null || true"
+            print_success "CUI server stopped"
+            ;;
+        restart)
+            cmd_cui_server stop
+            sleep 1
+            cmd_cui_server start
+            ;;
+        status)
+            local http_code
+            http_code=$(vm_bash "curl -s -o /dev/null -w '%{http_code}' http://localhost:$CUI_SERVER_PORT/api/health" 2>/dev/null)
+            if [ "$http_code" == "200" ] || [ "$http_code" == "401" ]; then
+                print_success "CUI server is running on port $CUI_SERVER_PORT"
+
+                # Show access token
+                local token_line
+                token_line=$(vm_bash "grep -o 'token=[a-f0-9]*' /tmp/cui-server.log 2>/dev/null | tail -1")
+                if [ -n "$token_line" ]; then
+                    local token="${token_line#token=}"
+                    echo -e "  ${GREEN}Access URL:${NC} http://localhost:$CUI_WEB_PORT#token=$token"
+                fi
+            else
+                print_error "CUI server is not running"
+            fi
+            ;;
+        logs)
+            vm_bash "tail -100 /tmp/cui-server.log 2>/dev/null || echo 'No logs found'"
+            ;;
+        *)
+            print_error "Unknown action: $action"
+            echo "Usage: cowork cui-server [start|stop|restart|status|logs]"
+            exit 1
+            ;;
+    esac
+}
+
+# Start CUI web UI on host (connects to sandbox server)
+cmd_cui_web() {
+    local action="${1:-start}"
+
+    # CUI source on host - use the workspace mount point
+    # VM /workspace/cui  <->  Host ~/Downloads/cowork-workspace/cui
+    local local_cui_dir="${COWORK_CUI_LOCAL:-$HOME/Downloads/cowork-workspace/cui}"
+
+    case "$action" in
+        start)
+            if [ ! -d "$local_cui_dir" ]; then
+                print_error "CUI source not found at: $local_cui_dir"
+                print_info "Deploy CUI first with: cowork cui-deploy"
+                print_info "Or set COWORK_CUI_LOCAL to your CUI source directory"
+                exit 1
+            fi
+
+            print_info "Starting CUI Web UI on port $CUI_WEB_PORT..."
+            print_info "Source: $local_cui_dir"
+            print_info "Connecting to sandbox server at localhost:$CUI_SERVER_PORT"
+
+            cd "$local_cui_dir"
+
+            # Check if dependencies are installed
+            if [ ! -d "node_modules" ]; then
+                print_info "Installing dependencies..."
+                npm install
+            fi
+
+            # Start Vite dev server
+            print_info "Starting Vite dev server..."
+            npm run dev:web &
+            local web_pid=$!
+
+            sleep 3
+
+            if kill -0 $web_pid 2>/dev/null; then
+                print_success "CUI Web UI started on http://localhost:$CUI_WEB_PORT"
+                print_info "Press Ctrl+C to stop"
+                wait $web_pid
+            else
+                print_error "Failed to start CUI Web UI"
+            fi
+            ;;
+        stop)
+            print_info "Stopping CUI Web UI..."
+            pkill -f "vite.*cui" 2>/dev/null || pkill -f "npm.*dev:web" 2>/dev/null || true
+            print_success "CUI Web UI stopped"
+            ;;
+        *)
+            print_error "Unknown action: $action"
+            echo "Usage: cowork cui-web [start|stop]"
+            exit 1
+            ;;
+    esac
+}
+
+# Check health of CUI services
+cmd_cui_health() {
+    check_lima
+
+    local status=$(vm_status)
+    local all_healthy=true
+
+    echo ""
+    print_header
+    echo ""
+    echo "CUI Services Health Check"
+    echo "========================="
+    echo ""
+
+    # Check VM status
+    echo -n "VM Status: "
+    if [ "$status" == "Running" ]; then
+        echo -e "${GREEN}Running${NC}"
+    else
+        echo -e "${RED}$status${NC}"
+        all_healthy=false
+    fi
+
+    # Check CUI deployment
+    echo -n "CUI Deployed: "
+    if [ "$status" == "Running" ] && vm_bash "test -d $CUI_DIR && echo EXISTS" 2>/dev/null | grep -q "EXISTS"; then
+        echo -e "${GREEN}Yes${NC}"
+    else
+        echo -e "${RED}No${NC}"
+        all_healthy=false
+    fi
+
+    # Check CUI server
+    echo -n "CUI Server (sandbox:$CUI_SERVER_PORT): "
+    if [ "$status" == "Running" ]; then
+        local health_response
+        health_response=$(vm_bash "curl -s -o /dev/null -w '%{http_code}' http://localhost:$CUI_SERVER_PORT/api/health" 2>/dev/null)
+        if [ "$health_response" == "200" ] || [ "$health_response" == "401" ]; then
+            # 200 = healthy, 401 = server running but needs auth
+            echo -e "${GREEN}Running${NC}"
+        else
+            echo -e "${RED}Not Running${NC}"
+            all_healthy=false
+        fi
+    else
+        echo -e "${RED}VM not running${NC}"
+        all_healthy=false
+    fi
+
+    # Check CUI Web (on host)
+    echo -n "CUI Web UI (host:$CUI_WEB_PORT): "
+    if curl -s "http://localhost:$CUI_WEB_PORT" >/dev/null 2>&1; then
+        echo -e "${GREEN}Running${NC}"
+    else
+        echo -e "${YELLOW}Not Running${NC}"
+    fi
+
+    # Check if API proxy is working (Vite proxies /api/* to sandbox)
+    echo -n "API Proxy (host -> sandbox): "
+    local proxy_code
+    proxy_code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$CUI_WEB_PORT/api/health" 2>/dev/null)
+    if [ "$proxy_code" == "200" ] || [ "$proxy_code" == "401" ]; then
+        echo -e "${GREEN}Working${NC}"
+    else
+        local direct_code
+        direct_code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$CUI_SERVER_PORT/api/health" 2>/dev/null)
+        if [ "$direct_code" == "200" ] || [ "$direct_code" == "401" ]; then
+            echo -e "${YELLOW}Direct access only (proxy not configured)${NC}"
+        else
+            echo -e "${RED}Not Available${NC}"
+        fi
+    fi
+
+    echo ""
+
+    if [ "$all_healthy" = true ]; then
+        print_success "All core services healthy"
+    else
+        print_error "Some services need attention"
+    fi
+    echo ""
+}
+
+# Full CUI setup (deploy + start server)
+cmd_cui_setup() {
+    print_header
+    echo ""
+    print_info "Setting up CUI (Claude UI)..."
+    echo ""
+
+    # Deploy CUI
+    cmd_cui_deploy
+
+    echo ""
+
+    # Start server
+    cmd_cui_server start
+
+    echo ""
+    print_success "CUI setup complete!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Start Web UI on your host machine:"
+    echo "     cowork cui-web start"
+    echo ""
+    echo "  2. Open http://localhost:$CUI_WEB_PORT in your browser"
+    echo ""
+    echo "  3. Check health anytime:"
+    echo "     cowork cui-health"
+    echo ""
+}
+
 # Show help
 cmd_help() {
     print_header
@@ -894,12 +1360,27 @@ cmd_help() {
     echo "  stop      Stop VM"
     echo "  status    Show VM status"
     echo "  config    View/modify VM configuration"
+    echo "  export    Export VM as pre-built image"
     echo "  delete    Delete VM"
     echo ""
     echo "  shell     Enter VM shell"
     echo "  exec      Run command in VM"
     echo "  claude    Interactive Claude session"
     echo "  ask       Non-interactive Claude query"
+    echo ""
+    echo "CUI (Claude UI) Commands:"
+    echo "  cui-setup     Full CUI setup (deploy + start server)"
+    echo "  cui-deploy    Deploy CUI to sandbox /workspace"
+    echo "  cui-server    Manage CUI server in sandbox"
+    echo "                  start   - Start API server (port $CUI_SERVER_PORT)"
+    echo "                  stop    - Stop API server"
+    echo "                  restart - Restart API server"
+    echo "                  status  - Check server status"
+    echo "                  logs    - View server logs"
+    echo "  cui-web       Manage CUI Web UI on host"
+    echo "                  start   - Start Vite dev server (port $CUI_WEB_PORT)"
+    echo "                  stop    - Stop Vite dev server"
+    echo "  cui-health    Check health of all CUI services"
     echo ""
     echo "Claude/Ask Options:"
     echo "  --workingdir <path>                Work in host path (e.g., ~/Projects/app)"
@@ -913,6 +1394,9 @@ cmd_help() {
     echo "  --proxy <host:port>     Set proxy"
     echo "  --no-proxy              Remove proxy"
     echo ""
+    echo "Export Options:"
+    echo "  -o, --output <file>     Output file path (default: ~/Downloads/cowork-sandbox-<timestamp>.tar.gz)"
+    echo ""
     echo "Examples:"
     echo "  cowork init"
     echo "  cowork claude                                  # Interactive mode"
@@ -922,7 +1406,14 @@ cmd_help() {
     echo "  cowork ask --project myapp \"create flask app\""
     echo "  cowork ask --plan \"design a REST API\""
     echo "  cowork config --mount ~/project:/project"
+    echo "  cowork export -o ~/my-sandbox.tar.gz           # Export VM image"
     echo "  cowork --vm-name dev init"
+    echo ""
+    echo "CUI Examples:"
+    echo "  cowork cui-setup                               # Full setup"
+    echo "  cowork cui-server start                        # Start API server"
+    echo "  cowork cui-web start                           # Start Web UI"
+    echo "  cowork cui-health                              # Check health"
     echo ""
     echo "Environment Variables:"
     echo "  COWORK_VM_NAME        VM name (default: sandbox)"
@@ -930,6 +1421,11 @@ cmd_help() {
     echo "  COWORK_PROXY_HOST     Proxy host"
     echo "  COWORK_PROXY_PORT     Proxy port (default: 7890)"
     echo "  COWORK_MOUNT          Custom mount (format: host:vm)"
+    echo "  COWORK_CUI_REPO       CUI git repository URL"
+    echo "  COWORK_CUI_PORT       CUI server port (default: 3001)"
+    echo "  COWORK_CUI_WEB_PORT   CUI web UI port (default: 3000)"
+    echo "  COWORK_CUI_LOCAL      Host path to CUI source (default: ~/Downloads/cowork-workspace/cui)"
+    echo "  ANTHROPIC_API_KEY     Claude API key"
     echo "  ANTHROPIC_AUTH_TOKEN  Claude API token"
     echo "  ANTHROPIC_BASE_URL    Claude API endpoint"
     echo ""
@@ -986,6 +1482,10 @@ case "${1:-help}" in
         shift
         cmd_config "$@"
         ;;
+    export)
+        shift
+        cmd_export "$@"
+        ;;
     shell)
         shift
         cmd_shell "$@"
@@ -1008,6 +1508,23 @@ case "${1:-help}" in
         ;;
     delete)
         cmd_delete
+        ;;
+    cui-setup)
+        cmd_cui_setup
+        ;;
+    cui-deploy)
+        cmd_cui_deploy
+        ;;
+    cui-server)
+        shift
+        cmd_cui_server "$@"
+        ;;
+    cui-web)
+        shift
+        cmd_cui_web "$@"
+        ;;
+    cui-health)
+        cmd_cui_health
         ;;
     help|--help|-h)
         cmd_help
