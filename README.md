@@ -4,6 +4,8 @@ A macOS sandbox environment for running Claude Code in an isolated Linux VM.
 
 ## One-Click Install (Apple Silicon)
 
+### Standard Install (Build from Scratch)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jingmca/vmcowork/main/install.sh | bash
 ```
@@ -12,7 +14,29 @@ This will:
 - Install Lima and jq (via Homebrew or direct download)
 - Clone the repository to `~/.vmcowork/`
 - Download pre-built VM package (if available) or build from scratch
+- Deploy CUI (Claude UI) web interface
 - Configure PATH automatically
+
+### Import Install (From Pre-built Image)
+
+If you have a pre-built VM image (exported via `cowork export`), you can skip the build step:
+
+```bash
+# One-liner with local image file
+curl -fsSL https://raw.githubusercontent.com/jingmca/vmcowork/main/install.sh | bash -s -- --import /path/to/image.tar.gz
+
+# Or using environment variable
+COWORK_IMPORT_IMAGE=/path/to/image.tar.gz curl -fsSL https://raw.githubusercontent.com/jingmca/vmcowork/main/install.sh | bash
+
+# Install without CUI
+curl -fsSL https://raw.githubusercontent.com/jingmca/vmcowork/main/install.sh | bash -s -- --no-cui
+```
+
+For existing installations, use the `cowork import` command directly:
+
+```bash
+cowork import ~/Downloads/cowork-sandbox-20250101.tar.gz
+```
 
 After installation:
 
@@ -72,6 +96,9 @@ cowork delete               # Delete sandbox
 
 cowork shell                # Enter VM shell
 cowork exec "command"       # Run command in VM
+
+cowork export -o image.tar.gz  # Export VM as image
+cowork import image.tar.gz     # Import VM from image
 ```
 
 ### Claude Commands via cowork
@@ -91,6 +118,34 @@ cowork ask --project myapp -c "add tests"
 cowork claude
 ```
 
+### CUI (Claude UI) - Web Interface
+
+CUI provides a web-based chat interface for Claude, running inside the sandbox VM.
+
+```bash
+# One-command setup (deploy + start server)
+cowork cui-setup
+
+# Or step by step:
+cowork cui-deploy              # Deploy CUI to sandbox /workspace
+cowork cui-server start        # Start API server in sandbox (port 3001)
+cowork cui-web start           # Start Web UI on host (port 3000)
+
+# Manage CUI server
+cowork cui-server stop         # Stop API server
+cowork cui-server restart      # Restart API server
+cowork cui-server status       # Check server status
+cowork cui-server logs         # View server logs
+
+# Manage CUI Web UI
+cowork cui-web stop            # Stop Web UI
+
+# Health check
+cowork cui-health              # Check all CUI services
+```
+
+After setup, open `http://localhost:3000` in your browser.
+
 ### Multiple Sandboxes
 
 Create independent sandboxes with different configurations:
@@ -99,7 +154,7 @@ Create independent sandboxes with different configurations:
 # Create sandbox for project A
 cowork --vm-name proj-a --mount ~/project-a:/workspace init
 
-# Create sandbox for project B  
+# Create sandbox for project B
 cowork --vm-name proj-b --mount ~/project-b:/workspace init
 
 # Use specific sandbox
@@ -151,24 +206,45 @@ Options:
   --proxy <host:port>   Proxy for VM network (only for init)
   --mount <host:vm>     Custom mount directory (only for init)
 
-Commands:
+VM Commands:
   init      Create and start a sandbox VM
+  import    Import VM from pre-built image (tar.gz)
+  export    Export VM as pre-built image
   list      List all VMs
   start     Start VM
   stop      Stop VM
   status    Show VM status
+  config    View/modify VM configuration
   delete    Delete VM
 
   shell     Enter VM shell
   exec      Run command in VM
+
+Claude Commands:
   claude    Interactive Claude session (all claude options supported)
   ask       Non-interactive Claude query (auto adds -p)
+
+CUI Commands:
+  cui-setup     Full CUI setup (deploy + start server)
+  cui-deploy    Deploy CUI to sandbox /workspace
+  cui-server    Manage CUI API server [start|stop|restart|status|logs]
+  cui-web       Manage CUI Web UI on host [start|stop]
+  cui-health    Check health of all CUI services
 
 Ask/Claude Options:
   --project <name>                   Work in /workspace/<name>
   --workingdir <path>                Work in host path (e.g., ~/Projects/app)
   --no-dangerously-skip-permissions  Don't auto-add --dangerously-skip-permissions
   (All Claude CLI options are passed through)
+
+Export Options:
+  -o, --output <file>   Output file path
+
+Config Options:
+  --mount <host:vm>       Add mount directory
+  --remove-mount <vm>     Remove mount by VM path
+  --proxy <host:port>     Set proxy
+  --no-proxy              Remove proxy
 ```
 
 ## Environment Variables
@@ -179,6 +255,13 @@ Ask/Claude Options:
 | `COWORK_PROXY_HOST` | Proxy host |
 | `COWORK_PROXY_PORT` | Proxy port (default: 7890) |
 | `COWORK_MOUNT` | Mount path (format: host:vm) |
+| `COWORK_IMPORT_IMAGE` | Pre-built image path (for install.sh) |
+| `COWORK_CUI_REPO` | CUI git repository URL |
+| `COWORK_CUI_PORT` | CUI API server port (default: 3001) |
+| `COWORK_CUI_WEB_PORT` | CUI Web UI port (default: 3000) |
+| `COWORK_CUI_LOCAL` | Host path to CUI source |
+| `COWORK_INSTALL_CUI` | Install CUI during setup (default: true) |
+| `ANTHROPIC_API_KEY` | API key for Claude |
 | `ANTHROPIC_AUTH_TOKEN` | API token for Claude |
 | `ANTHROPIC_BASE_URL` | API endpoint URL |
 
@@ -249,6 +332,9 @@ print(result.output)
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │  cowork CLI / controller.py                         │   │
 │  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  CUI Web UI (Vite dev server, port 3000)            │   │
+│  └─────────────────────────────────────────────────────┘   │
 │                           │ Lima/SSH                        │
 └───────────────────────────┼─────────────────────────────────┘
                             ▼
@@ -257,7 +343,11 @@ print(result.output)
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │  Claude Code CLI (isolated environment)             │   │
 │  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  CUI API Server (port 3001)                         │   │
+│  └─────────────────────────────────────────────────────┘   │
 │  /workspace ← mounted from host                            │
+│  /workspace/cui ← CUI source                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -268,7 +358,8 @@ cowork-sandbox/
 ├── scripts/
 │   ├── claude-sandbox      # Node.js wrapper (for spawn compatibility)
 │   ├── claude-sandbox.sh   # Bash implementation
-│   └── cowork              # Full CLI tool
+│   ├── cowork              # Full CLI tool
+│   └── import-vm.sh        # VM image importer
 ├── host/
 │   └── controller.py       # Python API
 ├── sandbox.yaml            # Lima VM configuration
@@ -298,6 +389,15 @@ npm install -g @anthropic-ai/claude-code
 ```bash
 cowork exec "curl -I https://google.com"
 cowork stop && cowork start
+```
+
+### CUI not working
+
+```bash
+cowork cui-health              # Check all services
+cowork cui-server logs         # View server logs
+cowork cui-server restart      # Restart API server
+cowork cui-deploy              # Redeploy CUI
 ```
 
 ## License

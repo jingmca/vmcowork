@@ -667,11 +667,11 @@ EOF
     echo ""
     echo "To import this image on another machine:"
     echo ""
-    echo "  # Option 1: Using install.sh"
-    echo "  ./install.sh --import $output_file"
+    echo "  # Option 1: One-liner install with import"
+    echo "  curl -fsSL https://raw.githubusercontent.com/jingmca/vmcowork/main/install.sh | bash -s -- --import $output_file"
     echo ""
-    echo "  # Option 2: Using environment variable"
-    echo "  COWORK_IMPORT_IMAGE=$output_file ./install.sh"
+    echo "  # Option 2: Using cowork import (if already installed)"
+    echo "  cowork import $output_file"
     echo ""
 }
 
@@ -1342,6 +1342,27 @@ cmd_cui_setup() {
     echo ""
 }
 
+# Import VM from pre-built image
+cmd_import() {
+    check_lima
+
+    local image_path="$1"
+
+    if [ -z "$image_path" ]; then
+        print_error "Usage: cowork import <image-file>"
+        print_error ""
+        print_error "Import a pre-built VM image (exported via 'cowork export')"
+        print_error ""
+        print_error "Examples:"
+        print_error "  cowork import ~/Downloads/cowork-sandbox-20250101.tar.gz"
+        print_error "  cowork --vm-name dev import /path/to/image.tar.gz"
+        exit 1
+    fi
+
+    # Delegate to import-vm.sh
+    exec "$SCRIPT_DIR/import-vm.sh" "$image_path" "$VM_NAME"
+}
+
 # Show help
 cmd_help() {
     print_header
@@ -1355,6 +1376,7 @@ cmd_help() {
     echo ""
     echo "Commands:"
     echo "  init      Create and start a sandbox VM"
+    echo "  import    Import VM from pre-built image file"
     echo "  list      List all VMs"
     echo "  start     Start VM"
     echo "  stop      Stop VM"
@@ -1396,6 +1418,10 @@ cmd_help() {
     echo ""
     echo "Export Options:"
     echo "  -o, --output <file>     Output file path (default: ~/Downloads/cowork-sandbox-<timestamp>.tar.gz)"
+    echo ""
+    echo "Import Examples:"
+    echo "  cowork import ~/Downloads/cowork-sandbox-20250101.tar.gz"
+    echo "  cowork --vm-name dev import /path/to/image.tar.gz"
     echo ""
     echo "Examples:"
     echo "  cowork init"
@@ -1485,6 +1511,10 @@ case "${1:-help}" in
     export)
         shift
         cmd_export "$@"
+        ;;
+    import)
+        shift
+        cmd_import "$@"
         ;;
     shell)
         shift
