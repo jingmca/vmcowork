@@ -228,7 +228,7 @@ CUI Commands:
   cui-setup     Full CUI setup (deploy + start server)
   cui-deploy    Deploy CUI to sandbox /workspace
   cui-server    Manage CUI API server [start|stop|restart|status|logs]
-  cui-web       Manage CUI Web UI on host [start|stop]
+  cui-web       Manage CUI Web UI on host [start|stop|update]
   cui-health    Check health of all CUI services
 
 Ask/Claude Options:
@@ -259,7 +259,7 @@ Config Options:
 | `COWORK_CUI_REPO` | CUI git repository URL |
 | `COWORK_CUI_PORT` | CUI API server port (default: 3001) |
 | `COWORK_CUI_WEB_PORT` | CUI Web UI port (default: 3000) |
-| `COWORK_CUI_LOCAL` | Host path to CUI source |
+| `COWORK_CUI_LOCAL` | Host path to CUI web source (default: ~/.vmcowork/cui-web) |
 | `COWORK_INSTALL_CUI` | Install CUI during setup (default: true) |
 | `ANTHROPIC_API_KEY` | API key for Claude |
 | `ANTHROPIC_AUTH_TOKEN` | API token for Claude |

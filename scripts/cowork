@@ -1174,29 +1174,45 @@ cmd_cui_server() {
 }
 
 # Start CUI web UI on host (connects to sandbox server)
+# Uses a separate host-side directory (~/.vmcowork/cui-web) to avoid
+# node_modules platform conflicts with the VM (Linux vs macOS).
 cmd_cui_web() {
     local action="${1:-start}"
 
-    # CUI source on host - use the workspace mount point
-    # VM /workspace/cui  <->  Host ~/Downloads/cowork-workspace/cui
-    local local_cui_dir="${COWORK_CUI_LOCAL:-$HOME/Downloads/cowork-workspace/cui}"
+    # Host-side CUI directory, independent from VM's /workspace/cui
+    local host_cui_dir="${COWORK_CUI_LOCAL:-$HOME/.vmcowork/cui-web}"
 
     case "$action" in
         start)
-            if [ ! -d "$local_cui_dir" ]; then
-                print_error "CUI source not found at: $local_cui_dir"
-                print_info "Deploy CUI first with: cowork cui-deploy"
-                print_info "Or set COWORK_CUI_LOCAL to your CUI source directory"
+            # Clone CUI to host directory if not present
+            if [ ! -d "$host_cui_dir/package.json" ] && [ ! -f "$host_cui_dir/package.json" ]; then
+                print_info "Setting up CUI Web UI on host..."
+                mkdir -p "$(dirname "$host_cui_dir")"
+
+                # Try to copy from VM's shared mount first (faster than git clone)
+                local shared_cui="$HOME/Downloads/cowork-workspace/cui"
+                if [ -d "$shared_cui/package.json" ] || [ -f "$shared_cui/package.json" ]; then
+                    print_info "Copying CUI source from shared workspace..."
+                    # Copy source files only, skip node_modules (wrong platform)
+                    rsync -a --exclude='node_modules' --exclude='.git' "$shared_cui/" "$host_cui_dir/"
+                else
+                    print_info "Cloning CUI repository..."
+                    git clone --depth 1 "$CUI_REPO" "$host_cui_dir"
+                fi
+            fi
+
+            if [ ! -f "$host_cui_dir/package.json" ]; then
+                print_error "CUI source not found. Deploy CUI first with: cowork cui-deploy"
                 exit 1
             fi
 
             print_info "Starting CUI Web UI on port $CUI_WEB_PORT..."
-            print_info "Source: $local_cui_dir"
+            print_info "Source: $host_cui_dir"
             print_info "Connecting to sandbox server at localhost:$CUI_SERVER_PORT"
 
-            cd "$local_cui_dir"
+            cd "$host_cui_dir"
 
-            # Check if dependencies are installed
+            # Install host-side dependencies (macOS native modules)
             if [ ! -d "node_modules" ]; then
                 print_info "Installing dependencies..."
                 npm install
@@ -1222,9 +1238,30 @@ cmd_cui_web() {
             pkill -f "vite.*cui" 2>/dev/null || pkill -f "npm.*dev:web" 2>/dev/null || true
             print_success "CUI Web UI stopped"
             ;;
+        update)
+            # Update host-side CUI source
+            if [ -d "$host_cui_dir/.git" ]; then
+                print_info "Updating CUI source..."
+                cd "$host_cui_dir" && git pull origin main
+                rm -rf node_modules
+                npm install
+                print_success "CUI Web UI updated"
+            else
+                # No git, re-copy from shared mount
+                local shared_cui="$HOME/Downloads/cowork-workspace/cui"
+                if [ -d "$shared_cui" ]; then
+                    print_info "Re-syncing from shared workspace..."
+                    rsync -a --exclude='node_modules' --exclude='.git' "$shared_cui/" "$host_cui_dir/"
+                    cd "$host_cui_dir" && rm -rf node_modules && npm install
+                    print_success "CUI Web UI updated"
+                else
+                    print_error "Cannot update: no git repo and shared workspace not found"
+                fi
+            fi
+            ;;
         *)
             print_error "Unknown action: $action"
-            echo "Usage: cowork cui-web [start|stop]"
+            echo "Usage: cowork cui-web [start|stop|update]"
             exit 1
             ;;
     esac
@@ -1402,6 +1439,7 @@ cmd_help() {
     echo "  cui-web       Manage CUI Web UI on host"
     echo "                  start   - Start Vite dev server (port $CUI_WEB_PORT)"
     echo "                  stop    - Stop Vite dev server"
+    echo "                  update  - Update CUI source and reinstall"
     echo "  cui-health    Check health of all CUI services"
     echo ""
     echo "Claude/Ask Options:"
@@ -1450,7 +1488,7 @@ cmd_help() {
     echo "  COWORK_CUI_REPO       CUI git repository URL"
     echo "  COWORK_CUI_PORT       CUI server port (default: 3001)"
     echo "  COWORK_CUI_WEB_PORT   CUI web UI port (default: 3000)"
-    echo "  COWORK_CUI_LOCAL      Host path to CUI source (default: ~/Downloads/cowork-workspace/cui)"
+    echo "  COWORK_CUI_LOCAL      Host path to CUI web source (default: ~/.vmcowork/cui-web)"
     echo "  ANTHROPIC_API_KEY     Claude API key"
     echo "  ANTHROPIC_AUTH_TOKEN  Claude API token"
     echo "  ANTHROPIC_BASE_URL    Claude API endpoint"
