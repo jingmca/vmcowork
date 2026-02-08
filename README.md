@@ -2,6 +2,8 @@
 
 A macOS sandbox environment for running Claude Code in an isolated Linux VM.
 
+[Chinese / 中文文档](README_CN.md)
+
 ## One-Click Install (Apple Silicon)
 
 ### Standard Install (Build from Scratch)
@@ -122,29 +124,54 @@ cowork claude
 
 CUI provides a web-based chat interface for Claude, running inside the sandbox VM.
 
+#### Quick Start
+
 ```bash
-# One-command setup (deploy + start server)
+# 1. Deploy and start server (one command)
 cowork cui-setup
 
-# Or step by step:
-cowork cui-deploy              # Deploy CUI to sandbox /workspace
-cowork cui-server start        # Start API server in sandbox (port 3001)
-cowork cui-web start           # Start Web UI on host (port 3000)
+# 2. Start Web UI on host
+cowork cui-web start
 
+# 3. Open the access URL printed by cui-server (includes token)
+#    Example: http://localhost:3000#token=abc123def456
+```
+
+#### Access Token
+
+CUI server generates a random access token on each startup for security. The token is displayed in the terminal output:
+
+```
+✓ CUI server started on port 3001
+
+  Access URL: http://localhost:3000#token=<your-token>
+```
+
+Open this URL directly in your browser. If you lose the token, retrieve it with:
+
+```bash
+cowork cui-server status    # Shows the access URL with token
+cowork cui-server logs      # Check server logs for token
+```
+
+#### CUI Commands
+
+```bash
 # Manage CUI server
+cowork cui-server start        # Start API server in sandbox (port 3001)
 cowork cui-server stop         # Stop API server
-cowork cui-server restart      # Restart API server
-cowork cui-server status       # Check server status
+cowork cui-server restart      # Restart API server (generates new token)
+cowork cui-server status       # Check server status and show access URL
 cowork cui-server logs         # View server logs
 
 # Manage CUI Web UI
+cowork cui-web start           # Start Web UI on host (port 3000)
 cowork cui-web stop            # Stop Web UI
+cowork cui-web update          # Update CUI source and reinstall
 
 # Health check
 cowork cui-health              # Check all CUI services
 ```
-
-After setup, open `http://localhost:3000` in your browser.
 
 ### Multiple Sandboxes
 
